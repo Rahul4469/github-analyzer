@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   db: # The service will be named db. 
     image: postgres:16-alpine 
