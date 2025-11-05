@@ -9,11 +9,7 @@ import (
 	"path"
 )
 
-type Template struct {
-	htmlTpl *template.Template
-}
-
-func ParseFs(fs fs.FS, patterns ...string) (Template, error) {
+func ParseFS(fs fs.FS, patterns ...string) (Template, error) {
 	tpl := template.New(path.Base(patterns[0]))
 	//Registers custom functions that can be called
 	//from within your HTML templates
@@ -33,9 +29,13 @@ func ParseFs(fs fs.FS, patterns ...string) (Template, error) {
 	return Template{htmlTpl: tpl}, nil
 }
 
+type Template struct {
+	htmlTpl *template.Template
+}
+
 // helper func to reuse for templates
 // Execute writes the tpl data as a response to the client
-func (t Template) Execute(w http.ResponseWriter, data interface{}) {
+func (t Template) Execute(w http.ResponseWriter, r *http.Request, data interface{}) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	err := t.htmlTpl.Execute(w, data)
 	if err != nil {

@@ -5,13 +5,13 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/!rahul4469/lenslocked/views"
 	"github.com/go-chi/chi/v5"
 	"github.com/joho/godotenv"
 	"github.com/rahul4469/github-analyzer/controllers"
 	"github.com/rahul4469/github-analyzer/migrations"
 	"github.com/rahul4469/github-analyzer/models"
 	"github.com/rahul4469/github-analyzer/templates"
+	"github.com/rahul4469/github-analyzer/views"
 )
 
 type config struct {
@@ -79,5 +79,7 @@ func run(cfg config) error {
 	}
 	r.Get("/", controllers.StaticHandler(tpl))
 
+	// Start the Server
+	fmt.Printf("Starting server at port %s...\n", cfg.Server.Address)
 	return http.ListenAndServe(cfg.Server.Address, r)
 }

@@ -1,1 +1,119 @@
 package models
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgconn"
+	"github.com/jackc/pgerrcode"
+	"golang.org/x/crypto/bcrypt"
+)
+
+type User struct {
+	ID             int
+	Email          string
+	PasswordHash   string
+	GitHubUsername sql.NullString // Nullable (user may not connect GitHub)
+	GitHubToken    sql.NullString
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type UserService struct {
+	DB *sql.DB
+}
+
+func (us *UserService) Create(email string, password string) (*User, error) {
+	email = strings.ToLower(email)
+	hashedBytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("create user: %w", err)
+	}
+	passwordHash := string(hashedBytes)
+
+	user := User{
+		Email:        email,
+		PasswordHash: passwordHash,
+	}
+
+	row := us.DB.QueryRow(`
+	    INSERT INTO users (email, password_hash)
+		VALUE ($1, $2) RETURNING id, created_at, updated_at`, email, password)
+	err = row.Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		var pgError *pgconn.PgError
+		if errors.As(err, &pgError) {
+			if pgError.Code == pgerrcode.UniqueViolation {
+				return nil, ErrEmailTaken
+			}
+		}
+		fmt.Printf("type = %T\n", err)
+		fmt.Printf("Error = %v\n", err)
+		return nil, fmt.Errorf("create user: %w", err)
+	}
+
+	return &user, nil
+}
+
+func (us *UserService) Authenticate(email, password string) (*User, error) {
+	email = strings.ToLower(email)
+	user := User{
+		Email: email,
+	}
+
+	row := us.DB.QueryRow(`
+	SELECT id, password_hash
+	FROM users 
+	WHERE email=$1`, email)
+	err := row.Scan(&user.ID,
+		&user.PasswordHash,
+		&user.GitHubUsername,
+		&user.GitHubToken,
+		&user.CreatedAt,
+		&user.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("authenticate: %w", err)
+	}
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
+	if err != nil {
+		return nil, fmt.Errorf("authenticate: %w", err)
+	}
+	return &user, nil
+}
+func (us *UserService) ByID(id int) (*User, error) {
+	user := User{}
+
+	row := us.DB.QueryRow(`
+	SELECT id, password_hash
+	FROM users 
+	WHERE id=$1`, id)
+	err := row.Scan(&user.Email,
+		&user.PasswordHash,
+		&user.GitHubUsername,
+		&user.GitHubToken,
+		&user.CreatedAt,
+		&user.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("authenticate: %w", err)
+	}
+
+	return &user, nil
+}
+
+// When user provides Github credentials
+// UpdateGithubCredentials stored github username and token
+func (us *UserService) UpdateGithubCredentials(userID int, username string, token string) error {
+	_, err := us.DB.Exec(`
+	UPDATE users
+	SET github_username = $1, github_token = $2, updated_at = NOW()
+    WHERE id = $3`, username, token, userID)
+
+	if err != nil {
+		return fmt.Errorf("update gitub credentials: %w", err)
+	}
+
+	return nil
+}
