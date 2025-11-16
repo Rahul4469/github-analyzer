@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/gorilla/csrf"
 	"github.com/joho/godotenv"
 	"github.com/rahul4469/github-analyzer/controllers"
 	"github.com/rahul4469/github-analyzer/migrations"
@@ -18,6 +20,11 @@ type config struct {
 	PSQL   models.PostgresConfig
 	Server struct {
 		Address string
+	}
+	CSRF struct {
+		Key            string
+		Secure         bool
+		TrustedOrigins []string
 	}
 }
 
@@ -40,6 +47,10 @@ func loadEnvConfig() (config, error) {
 	if cfg.PSQL.Host == "" && cfg.PSQL.Port == "" {
 		return cfg, fmt.Errorf("no psql config provided")
 	}
+
+	cfg.CSRF.Key = os.Getenv("CSRF_KEY")
+	cfg.CSRF.Secure = os.Getenv("CSRF_SECURE") == "true"
+	cfg.CSRF.TrustedOrigins = strings.Fields(os.Getenv("CSRF_TRUSTED_ORIGINS"))
 
 	cfg.Server.Address = os.Getenv("SERVER_ADDRESS")
 
@@ -70,14 +81,34 @@ func run(cfg config) error {
 		return err
 	}
 
-	// Setup router
+	// Setup Services ---------------
+	userService := &models.UserService{
+		DB: db,
+	}
+
+	//CSRF middleware
+	csrfMw := csrf.Protect([]byte(cfg.CSRF.Key), csrf.Secure(cfg.CSRF.Secure), csrf.Path("/"), csrf.TrustedOrigins(cfg.CSRF.TrustedOrigins))
+
+	// Setup Contollers ---------------
+	userC := controllers.Users{
+		UserService: userService, //passing an address
+	}
+	userC.Template.New, err = views.ParseFS(templates.FS, "signup.gohtml", "tailwind.gohtml")
+	if err != nil {
+		panic(err)
+	}
+
+	// Setup router and routes
 	r := chi.NewRouter()
+	r.Use(csrfMw)
 
 	tpl, err := views.ParseFS(templates.FS, "home.gohtml", "tailwind.gohtml")
 	if err != nil {
 		panic(err)
 	}
 	r.Get("/", controllers.StaticHandler(tpl))
+
+	r.Get("/signup", userC.New)
 
 	// Start the Server
 	fmt.Printf("Starting server at port %s...\n", cfg.Server.Address)
