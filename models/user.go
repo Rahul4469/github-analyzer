@@ -41,7 +41,7 @@ func (us *UserService) Create(email string, password string) (*User, error) {
 
 	row := us.DB.QueryRow(`
 	    INSERT INTO users (email, password_hash)
-		VALUE ($1, $2) RETURNING id, created_at, updated_at`, email, password)
+		VALUES ($1, $2) RETURNING id, created_at, updated_at`, email, passwordHash)
 	err = row.Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		var pgError *pgconn.PgError
@@ -65,7 +65,7 @@ func (us *UserService) Authenticate(email, password string) (*User, error) {
 	}
 
 	row := us.DB.QueryRow(`
-	SELECT id, password_hash
+	SELECT id, password_hash, github_username, github_token, created_at, updated_at
 	FROM users 
 	WHERE email=$1`, email)
 	err := row.Scan(&user.ID,

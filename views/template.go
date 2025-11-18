@@ -11,6 +11,8 @@ import (
 	"path"
 
 	"github.com/gorilla/csrf"
+	"github.com/rahul4469/github-analyzer/context"
+	"github.com/rahul4469/github-analyzer/models"
 )
 
 func ParseFS(fs fs.FS, patterns ...string) (Template, error) {
@@ -20,8 +22,11 @@ func ParseFS(fs fs.FS, patterns ...string) (Template, error) {
 	//Funcs must be called before ParseFS/Parse
 	tpl.Funcs(
 		template.FuncMap{
-			"csrfField": func() template.HTML {
-				return `<input type="hidden">`
+			"csrfField": func() (template.HTML, error) {
+				return "", fmt.Errorf("CSRDField not implemented")
+			},
+			"currentUser": func() (template.HTML, error) {
+				return "", fmt.Errorf("current user not implemented")
 			},
 		},
 	)
@@ -52,12 +57,15 @@ func (t Template) Execute(w http.ResponseWriter, r *http.Request, data interface
 			"csrfField": func() template.HTML {
 				return csrf.TemplateField(r)
 			},
+			"currentUser": func() *models.User {
+				return context.User(r.Context())
+			},
 		},
 	)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	var buf bytes.Buffer
-	err = t.htmlTpl.Execute(&buf, data) // ?
+	err = tpl.Execute(&buf, data) // ?
 	if err != nil {
 		log.Printf("parsing template: %v", err)
 		http.Error(w, "There was an error Executing the template", http.StatusInternalServerError)

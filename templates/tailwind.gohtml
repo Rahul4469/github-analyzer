@@ -71,9 +71,9 @@
                                 <a href="/"
                                     class="rounded-md bg-zinc-400/30 px-3 py-2 text-sm font-medium text-gray-800 hover:bg-zinc-400 hover:text-zinc-900"
                                     aria-current="page">Home</a>
-                                <a href="/contact"
+                                <a href="#"
                                     class="rounded-md px-3 py-2 text-sm font-medium font-bold text-gray-800 hover:bg-zinc-500/30 hover:text-zinc-800">Contact</a>
-                                <a href="/faq"
+                                <a href="#"
                                     class="rounded-md px-3 py-2 text-sm font-medium font-bold text-gray-800 hover:bg-zinc-500/30 hover:text-zinc-800">FAQ</a>
                                 <!-- <a href="/galleries"
                                     class="rounded-md px-3 py-2 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white">Galleries</a> -->
@@ -83,13 +83,23 @@
 
 
 
-                    <div class="absolute inset-y-0 right-0 flex items-center pr-2 sm:static sm:inset-auto sm:ml-6 sm:pr-0">
-                        
+                    <div
+                        class="absolute inset-y-0 right-0 flex items-center pr-2 sm:static sm:inset-auto sm:ml-6 sm:pr-0">
+
+                        {{if currentUser}}
+                        <form action="/signout" method="post" class="inline pr-4">
+                            <div class="hidden">{{csrfField}}</div>
+                            <button type="submit"
+                                class="rounded-md px-4 py-2 text-sm font-medium text-gray-800 hover:text-white">Sign out</button>
+                        </form>
+                        {{else}}
                         <a href="/signin"
-                            class="rounded-md px-3 py-2 text-sm font-medium text-gray-800 hover:text-white">Sign in</a>
+                            class="rounded-md px-3 py-2 text-sm font-medium text-gray-800 hover:text-gray-500">Sign
+                            in</a>
                         <a href="/signup"
-                            class="rounded-md bg-zinc-400/30 px-3 py-2 text-sm font-medium text-gray-800 hover:bg-zinc-400 hover:text-zinc-900">
+                            class="rounded-md bg-zinc-700/30 px-3 py-2 text-sm font-medium text-gray-800 hover:bg-zinc-500 hover:text-gray-900">
                             Sign up</a>
+                        {{end}}
 
 
                         <!-- Notifications menu -->
@@ -195,31 +205,31 @@
             <div class="mt-24 border-t border-white/10 pt-12 xl:grid xl:grid-cols-3 xl:gap-8">
                 <!-- Icon -->
                 <!-- -->
-                        <div class="flex shrink-0 items-center pr-8">
-                            <a href="/" class="group relative">
-                                <div class="flex items-baseline gap-2">
-                                    <!-- Main text -->
-                                    <!-- <span class="font-mono font-bold text-3xl text-gray-800 dark:text-white 
+                <div class="flex shrink-0 items-center pr-8">
+                    <a href="/" class="group relative">
+                        <div class="flex items-baseline gap-2">
+                            <!-- Main text -->
+                            <!-- <span class="font-mono font-bold text-3xl text-gray-800 dark:text-white 
                          tracking-tight transition-all group-hover:text-gray-600 
                          dark:group-hover:text-gray-200">
                                         Cloud
                                     </span> -->
 
-                                    <!-- Cursive accent -->
-                                    <span class=" font-exbold text-3xl text-white dark:white 
+                            <!-- Cursive accent -->
+                            <span class=" font-exbold text-3xl text-white dark:white 
                          font-light transition-all group-hover:text-zinc-900 
                          dark:group-hover:text-zinc-200 group-hover:scale-110" style="font-family: 'Dancing Script';">
-                                        Gitanalyze
-                                    </span>
-                                </div>
-
-                                <!-- Optional: Subtle underline on hover -->
-                                <div class="absolute bottom-0 left-0 w-0 h-0.5 bg-zinc-600 
-                        transition-all duration-300 group-hover:w-full">
-                                </div>
-                            </a>
+                                Gitanalyze
+                            </span>
                         </div>
-                        <!---->
+
+                        <!-- Optional: Subtle underline on hover -->
+                        <div class="absolute bottom-0 left-0 w-0 h-0.5 bg-zinc-600 
+                        transition-all duration-300 group-hover:w-full">
+                        </div>
+                    </a>
+                </div>
+                <!---->
                 <div class="mt-16 grid grid-cols-2 gap-8 xl:col-span-2 xl:mt-0">
                     <div class="md:grid md:grid-cols-2 md:gap-8">
                         <div>

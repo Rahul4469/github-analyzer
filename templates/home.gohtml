@@ -17,11 +17,16 @@
         <p class="mt-8 text-pretty font-serif text-lg font-medium text-gray-800 sm:text-xl/8">Analyze your GitHub repositories for code quality, contributions,<br> and trends—instantly uncover 
             insights to boost your development productivity.</p>
         <div class="mt-10 flex items-center justify-center gap-x-6">
-          
-            <a href="/signin" class="rounded-md bg-zinc-500 px-3.5 py-2.5 text-sm font-semibold text-white shadow-sm 
+            {{if currentUser}}
+                <a href="#" class="rounded-md bg-zinc-500 px-3.5 py-2.5 text-sm font-semibold text-white shadow-sm 
+                hover:bg-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 
+                focus-visible:outline-zinc-400">View Dashboard</a>
+            {{else}}
+                <a href="/signin" class="rounded-md bg-zinc-500 px-3.5 py-2.5 text-sm font-semibold text-white shadow-sm 
                 hover:bg-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 
                 focus-visible:outline-zinc-400">Sign in to start</a>
             <a href="/faq" class="text-sm/6 font-semibold text-gray-800">Learn more <span aria-hidden="true">→</span></a>
+            {{end}}
           
         </div>
       </div>

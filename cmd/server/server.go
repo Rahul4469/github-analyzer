@@ -85,15 +85,26 @@ func run(cfg config) error {
 	userService := &models.UserService{
 		DB: db,
 	}
+	sessionService := &models.SessionService{
+		DB: db,
+	}
 
 	//CSRF middleware
 	csrfMw := csrf.Protect([]byte(cfg.CSRF.Key), csrf.Secure(cfg.CSRF.Secure), csrf.Path("/"), csrf.TrustedOrigins(cfg.CSRF.TrustedOrigins))
+	umw := controllers.UserMiddleware{
+		SessionService: sessionService,
+	}
 
 	// Setup Contollers ---------------
 	userC := controllers.Users{
-		UserService: userService, //passing an address
+		UserService:    userService,
+		SessionService: sessionService,
 	}
 	userC.Template.New, err = views.ParseFS(templates.FS, "signup.gohtml", "tailwind.gohtml")
+	if err != nil {
+		panic(err)
+	}
+	userC.Template.Signin, err = views.ParseFS(templates.FS, "signin.gohtml", "tailwind.gohtml")
 	if err != nil {
 		panic(err)
 	}
@@ -101,6 +112,7 @@ func run(cfg config) error {
 	// Setup router and routes
 	r := chi.NewRouter()
 	r.Use(csrfMw)
+	r.Use(umw.SetUser)
 
 	tpl, err := views.ParseFS(templates.FS, "home.gohtml", "tailwind.gohtml")
 	if err != nil {
@@ -109,6 +121,16 @@ func run(cfg config) error {
 	r.Get("/", controllers.StaticHandler(tpl))
 
 	r.Get("/signup", userC.New)
+	r.Post("/users", userC.Create)
+	r.Get("/signin", userC.Signin)
+	r.Post("/signin", userC.ProcessSignIn)
+	r.Post("/signout", userC.ProcessSignOut)
+
+	r.Route("/users/me", func(r chi.Router) {
+		r.Use(umw.RequireUser)
+		r.Get("/", userC.CurrentUser)
+
+	})
 
 	// Start the Server
 	fmt.Printf("Starting server at port %s...\n", cfg.Server.Address)
