@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -13,13 +14,16 @@ import (
 )
 
 type User struct {
-	ID             int
-	Email          string
-	PasswordHash   string
-	GitHubUsername sql.NullString // Nullable (user may not connect GitHub)
-	GitHubToken    sql.NullString
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID            int        `json:"id"`
+	Username      string     `json:"username"`
+	Email         string     `json:"email"`
+	PasswordHash  string     `json:"-"`
+	GitHubToken   string     `json:"-"`
+	APIQuotaUsed  int        `json:"api_quota_used"`
+	APIQuotaLimit int        `json:"api_quota_limit"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	LastLogin     *time.Time `json:"last_login,omitempty"`
 }
 
 type UserService struct {
@@ -70,7 +74,7 @@ func (us *UserService) Authenticate(email, password string) (*User, error) {
 	WHERE email=$1`, email)
 	err := row.Scan(&user.ID,
 		&user.PasswordHash,
-		&user.GitHubUsername,
+		&user.Username,
 		&user.GitHubToken,
 		&user.CreatedAt,
 		&user.UpdatedAt)
@@ -92,12 +96,38 @@ func (us *UserService) ByID(id int) (*User, error) {
 	WHERE id=$1`, id)
 	err := row.Scan(&user.Email,
 		&user.PasswordHash,
-		&user.GitHubUsername,
+		&user.Username,
 		&user.GitHubToken,
 		&user.CreatedAt,
 		&user.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("authenticate: %w", err)
+	}
+
+	return &user, nil
+}
+
+// GetByUsername retrieves a user by their username
+func (us *UserService) GetByUsername(ctx context.Context, username string) (*User, error) {
+	var user User
+
+	err := us.DB.QueryRowContext(
+		ctx,
+		`SELECT id, username, email, password_hash, github_token,
+		        api_quota_used, api_quota_limit, created_at, updated_at, last_login
+		 FROM users WHERE username = $1`,
+		username,
+	).Scan(
+		&user.ID, &user.Username, &user.Email, &user.PasswordHash,
+		&user.GitHubToken, &user.APIQuotaUsed, &user.APIQuotaLimit,
+		&user.CreatedAt, &user.UpdatedAt, &user.LastLogin,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("user not found")
+		}
+		return nil, fmt.Errorf("failed to fetch user: %w", err)
 	}
 
 	return &user, nil
