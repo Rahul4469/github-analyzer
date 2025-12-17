@@ -3,14 +3,8 @@ package models
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"strings"
 	"time"
-
-	"github.com/jackc/pgconn"
-	"github.com/jackc/pgerrcode"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type User struct {
@@ -30,78 +24,51 @@ type UserService struct {
 	DB *sql.DB
 }
 
-func (us *UserService) Create(email string, password string) (*User, error) {
-	email = strings.ToLower(email)
-	hashedBytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return nil, fmt.Errorf("create user: %w", err)
-	}
-	passwordHash := string(hashedBytes)
-
-	user := User{
-		Email:        email,
-		PasswordHash: passwordHash,
+// Create creates a new user in the database
+func (us *UserService) Create(ctx context.Context, user *User) (*User, error) {
+	// Validate input
+	if user.Username == "" || user.Email == "" || user.GitHubToken == "" {
+		return nil, fmt.Errorf("username, email, and github_token are required")
 	}
 
-	row := us.DB.QueryRow(`
-	    INSERT INTO users (email, password_hash)
-		VALUES ($1, $2) RETURNING id, created_at, updated_at`, email, passwordHash)
-	err = row.Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
+	// Insert user
+	err := us.DB.QueryRowContext(
+		ctx,
+		`INSERT INTO users (username, email, password_hash, github_token, api_quota_used, api_quota_limit)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, created_at, updated_at`,
+		user.Username, user.Email, user.PasswordHash, user.GitHubToken,
+		0, 1000, // Default quota
+	).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
+
 	if err != nil {
-		var pgError *pgconn.PgError
-		if errors.As(err, &pgError) {
-			if pgError.Code == pgerrcode.UniqueViolation {
-				return nil, ErrEmailTaken
-			}
+		return nil, fmt.Errorf("failed to create user: %w", err)
+	}
+
+	return user, nil
+}
+
+// GetByID retrieves a user by their ID
+func (us *UserService) GetByID(ctx context.Context, id int) (*User, error) {
+	var user User
+
+	err := us.DB.QueryRowContext(
+		ctx,
+		`SELECT id, username, email, password_hash, github_token,
+		        api_quota_used, api_quota_limit, created_at, updated_at, last_login
+		 FROM users WHERE id = $1`,
+		id,
+	).Scan(
+		&user.ID, &user.Username, &user.Email, &user.PasswordHash,
+		&user.GitHubToken, &user.APIQuotaUsed, &user.APIQuotaLimit,
+		&user.CreatedAt, &user.UpdatedAt, &user.LastLogin,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("user not found")
 		}
-		fmt.Printf("type = %T\n", err)
-		fmt.Printf("Error = %v\n", err)
-		return nil, fmt.Errorf("create user: %w", err)
-	}
-
-	return &user, nil
-}
-
-func (us *UserService) Authenticate(email, password string) (*User, error) {
-	email = strings.ToLower(email)
-	user := User{
-		Email: email,
-	}
-
-	row := us.DB.QueryRow(`
-	SELECT id, password_hash, github_username, github_token, created_at, updated_at
-	FROM users 
-	WHERE email=$1`, email)
-	err := row.Scan(&user.ID,
-		&user.PasswordHash,
-		&user.Username,
-		&user.GitHubToken,
-		&user.CreatedAt,
-		&user.UpdatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("authenticate: %w", err)
-	}
-	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
-	if err != nil {
-		return nil, fmt.Errorf("authenticate: %w", err)
-	}
-	return &user, nil
-}
-func (us *UserService) ByID(id int) (*User, error) {
-	user := User{}
-
-	row := us.DB.QueryRow(`
-	SELECT id, password_hash
-	FROM users 
-	WHERE id=$1`, id)
-	err := row.Scan(&user.Email,
-		&user.PasswordHash,
-		&user.Username,
-		&user.GitHubToken,
-		&user.CreatedAt,
-		&user.UpdatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("authenticate: %w", err)
+		return nil, fmt.Errorf("failed to fetch user: %w", err)
 	}
 
 	return &user, nil
@@ -133,17 +100,135 @@ func (us *UserService) GetByUsername(ctx context.Context, username string) (*Use
 	return &user, nil
 }
 
-// When user provides Github credentials
-// UpdateGithubCredentials stored github username and token
-func (us *UserService) UpdateGithubCredentials(userID int, username string, token string) error {
-	_, err := us.DB.Exec(`
-	UPDATE users
-	SET github_username = $1, github_token = $2, updated_at = NOW()
-    WHERE id = $3`, username, token, userID)
+// GetByEmail retrieves a user by their email
+func (us *UserService) GetByEmail(ctx context.Context, email string) (*User, error) {
+	var user User
+
+	err := us.DB.QueryRowContext(
+		ctx,
+		`SELECT id, username, email, password_hash, github_token,
+		        api_quota_used, api_quota_limit, created_at, updated_at, last_login
+		 FROM users WHERE email = $1`,
+		email,
+	).Scan(
+		&user.ID, &user.Username, &user.Email, &user.PasswordHash,
+		&user.GitHubToken, &user.APIQuotaUsed, &user.APIQuotaLimit,
+		&user.CreatedAt, &user.UpdatedAt, &user.LastLogin,
+	)
 
 	if err != nil {
-		return fmt.Errorf("update gitub credentials: %w", err)
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("user not found")
+		}
+		return nil, fmt.Errorf("failed to fetch user: %w", err)
+	}
+
+	return &user, nil
+}
+
+// UpdateGitHubToken updates a user's GitHub token
+func (us *UserService) UpdateGitHubToken(ctx context.Context, userID int, githubToken string) error {
+	if githubToken == "" {
+		return fmt.Errorf("github token cannot be empty")
+	}
+
+	result, err := us.DB.ExecContext(
+		ctx,
+		`UPDATE users SET github_token = $1, updated_at = NOW()
+		 WHERE id = $2`,
+		githubToken, userID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update github token: %w", err)
+	}
+
+	// to check if user not found in db
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("user not found")
 	}
 
 	return nil
+}
+
+// UpdateLastLogin updates user's last login time
+func (us *UserService) UpdateLastLogin(ctx context.Context, userID int) error {
+	_, err := us.DB.ExecContext(
+		ctx,
+		`UPDATE users SET last_login = NOW()
+		 WHERE id = $1`,
+		userID,
+	)
+
+	return err
+}
+
+// Delete deletes a user from the database
+func (us *UserService) Delete(ctx context.Context, userID int) error {
+	result, err := us.DB.ExecContext(
+		ctx,
+		`DELETE FROM users WHERE id = $1`,
+		userID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to delete user: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("user not found")
+	}
+
+	return nil
+}
+
+// UpdateQuota updates user's API quota usage
+func (us *UserService) UpdateQuota(ctx context.Context, userID int, used int) error {
+	result, err := us.DB.ExecContext(
+		ctx,
+		`UPDATE users SET api_quota_used = $1, updated_at = NOW()
+		 WHERE id = $2`,
+		used, userID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update quota: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("user not found")
+	}
+
+	return nil
+}
+
+// CheckQuotaAvailable checks if user has API quota available
+func (us *UserService) CheckQuotaAvailable(ctx context.Context, userID int) (bool, error) {
+	var used, limit int
+
+	err := us.DB.QueryRowContext(
+		ctx,
+		`SELECT api_quota_used, api_quota_limit FROM users WHERE id = $1`,
+		userID,
+	).Scan(&used, &limit)
+
+	if err != nil {
+		return false, fmt.Errorf("failed to check quota: %w", err)
+	}
+
+	return used < limit, nil
 }
