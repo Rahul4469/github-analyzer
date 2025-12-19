@@ -2,9 +2,7 @@ package models
 
 import "time"
 
-// ============================================
-// RESPONSE TYPES
-// ============================================
+// RESPONSE TYPES ----------------------------------------
 
 // AnalysisResponse wraps analysis results for API response
 type AnalysisResponse struct {
