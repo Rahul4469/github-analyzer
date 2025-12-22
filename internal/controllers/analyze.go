@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rahul4469/github-analyzer/models"
-	"github.com/rahul4469/github-analyzer/services"
+	localcontext "github.com/rahul4469/github-analyzer/context"
+	"github.com/rahul4469/github-analyzer/internal/models"
+	"github.com/rahul4469/github-analyzer/internal/services"
 )
 
 type AnalyzeController struct {
@@ -297,5 +298,5 @@ func getUserFromContext(r *http.Request) *models.User {
 	// }
 	// return user
 
-	return models.UserFromContext(r.Context())
+	return localcontext.UserFromContext(r.Context())
 }

@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"fmt"
 	"io/fs"
 	"net/http"
 	"path/filepath"
@@ -35,6 +36,7 @@ func (gtr *GoTemplateRenderer) Render(w http.ResponseWriter, templateName string
 	// Check cache first if enabled
 	if gtr.Cache {
 		if tmpl, exists := gtr.Templates[templateName]; exists {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			return tmpl.Execute(w, data)
 		}
 	}
@@ -51,6 +53,7 @@ func (gtr *GoTemplateRenderer) Render(w http.ResponseWriter, templateName string
 	}
 
 	// Execute template
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	return tmpl.Execute(w, data)
 }
 
@@ -60,15 +63,22 @@ func (gtr *GoTemplateRenderer) parseTemplate(templateName string) (*template.Tem
 	basePath := filepath.Join(gtr.BasePath, "base.gohtml")
 	tmpl, err := template.ParseFS(gtr.FS, basePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse base template: %w", err)
 	}
 
 	// Parse requested template
 	templatePath := filepath.Join(gtr.BasePath, templateName)
 	tmpl, err = tmpl.ParseFS(gtr.FS, templatePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse template file: %w", err)
 	}
 
 	return tmpl, nil
+}
+
+func (gtr *GoTemplateRenderer) RenderError(w http.ResponseWriter, templateName string, errorMsg string) error {
+	data := map[string]interface{}{
+		"Error": errorMsg,
+	}
+	return gtr.Render(w, templateName, data)
 }

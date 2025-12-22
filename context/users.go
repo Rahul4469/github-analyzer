@@ -3,7 +3,7 @@ package context
 import (
 	"context"
 
-	"github.com/rahul4469/github-analyzer/models"
+	"github.com/rahul4469/github-analyzer/internal/models"
 )
 
 type key string
@@ -19,7 +19,7 @@ func WithUser(ctx context.Context, user *models.User) context.Context {
 	return context.WithValue(ctx, userKey, user)
 }
 
-func User(ctx context.Context) *models.User {
+func UserFromContext(ctx context.Context) *models.User {
 	val := ctx.Value(userKey)
 	user, ok := val.(*models.User)
 	if !ok {

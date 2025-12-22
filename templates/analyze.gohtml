@@ -1,0 +1,102 @@
+{{define .content}}
+<div class="analyze-page">
+    <div class="page-header">
+        <h1>Analyze Repository</h1>
+        <p class="subtitle">Enter your GitHub repository details to get started</p>
+    </div>
+
+    {{if .Error}}
+        <div class="alert alert-error">
+            <span class="alert-icon">⚠️</span>
+            <span class="alert-message">{{.Error}}</span>
+        </div>
+    {{end}}
+
+    <div class="form-container">
+        <form method="POST" action="/analyze" class="analyze-form">
+            <!-- Repository URL Input -->
+            <div class="form-group">
+                <label for="repository" class="form-label">
+                    Repository URL
+                    <span class="required">*</span>
+                </label>
+                <div class="input-wrapper">
+                    <span class="input-prefix">github.com/</span>
+                    <input
+                        type="text"
+                        id="repository"
+                        name="repository"
+                        placeholder="owner/repository"
+                        class="form-input"
+                        required
+                        pattern="^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$"
+                    >
+                </div>
+                <p class="form-help">Example: golang/go or facebook/react</p>
+            </div>
+
+            <!-- GitHub Token Input -->
+            <div class="form-group">
+                <label for="github_token" class="form-label">
+                    GitHub Personal Access Token
+                    <span class="required">*</span>
+                </label>
+                <input
+                    type="password"
+                    id="github_token"
+                    name="github_token"
+                    placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    class="form-input"
+                    required
+                    minlength="30"
+                >
+                <p class="form-help">
+                    Your token is used only for this analysis and is never stored.
+                    <a href="https://github.com/settings/tokens" target="_blank" class="help-link">
+                        Create a token →
+                    </a>
+                </p>
+            </div>
+
+            <!-- Info Box -->
+            <div class="info-box">
+                <h3 class="info-title">How it works:</h3>
+                <ol class="info-list">
+                    <li>Provide your GitHub repository details</li>
+                    <li>Enter your GitHub Personal Access Token (public repo access only)</li>
+                    <li>Our system analyzes your code for quality, security, and performance</li>
+                    <li>Get detailed insights and recommendations</li>
+                </ol>
+            </div>
+
+            <!-- Submit Button -->
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary btn-lg">
+                    <span class="btn-icon">⚡</span>
+                    <span class="btn-text">Analyze Repository</span>
+                </button>
+            </div>
+
+            <!-- Security Notice -->
+            <div class="security-notice">
+                <span class="notice-icon">🔒</span>
+                <span class="notice-text">
+                    Your GitHub token is validated and used securely.
+                    It is never stored or shared.
+                </span>
+            </div>
+        </form>
+
+        <!-- Token Info Card -->
+        <div class="info-card">
+            <h3 class="card-title">About GitHub Tokens</h3>
+            <p>We only need read access to public repositories. Create a token with minimal permissions:</p>
+            <ul class="token-perms">
+                <li>✅ <code>public_repo</code> - Access public repositories</li>
+                <li>✅ <code>read:user</code> - Read user information</li>
+                <li>❌ <strong>Never</strong> give write or delete permissions</li>
+            </ul>
+        </div>
+    </div>
+</div>
+{{end}}

@@ -66,6 +66,10 @@ type AnalysisService struct {
 	DB *sql.DB
 }
 
+func NewAnalysisService(db *sql.DB) *AnalysisService {
+	return &AnalysisService{DB: db}
+}
+
 // Create creates a new analysis into the db
 func (as *AnalysisService) Create(ctx context.Context, analysis *Analysis) (*Analysis, error) {
 	if analysis.RepositoryID == 0 {

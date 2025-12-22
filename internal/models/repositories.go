@@ -69,6 +69,10 @@ type RepositoryService struct {
 	DB *sql.DB
 }
 
+func NewRepositoryService(db *sql.DB) *RepositoryService {
+	return &RepositoryService{DB: db}
+}
+
 // Create creates a new repository
 func (rs *RepositoryService) Create(ctx context.Context, repo *Repository) (*Repository, error) {
 	if repo.UserID == 0 || repo.FullName == "" {

@@ -32,7 +32,7 @@ func (df *DataFormatter) FormatRepositoryDataForAnalysis(repoData *RepositoryDat
 	output.WriteString("\n")
 
 	// Statistics
-	output.WriteString(fmt.Sprintf("Statistics:\n"))
+	output.WriteString("Statistics:\n")
 	output.WriteString(fmt.Sprintf("  Stars: %d\n", repo.GetStargazersCount()))
 	output.WriteString(fmt.Sprintf("  Forks: %d\n", repo.GetForksCount()))
 	output.WriteString(fmt.Sprintf("  Watchers: %d\n", repo.GetWatchersCount()))

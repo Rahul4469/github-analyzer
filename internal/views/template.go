@@ -12,7 +12,7 @@ import (
 
 	"github.com/gorilla/csrf"
 	"github.com/rahul4469/github-analyzer/context"
-	"github.com/rahul4469/github-analyzer/models"
+	"github.com/rahul4469/github-analyzer/internal/models"
 )
 
 func ParseFS(fs fs.FS, patterns ...string) (Template, error) {
@@ -58,7 +58,7 @@ func (t Template) Execute(w http.ResponseWriter, r *http.Request, data interface
 				return csrf.TemplateField(r)
 			},
 			"currentUser": func() *models.User {
-				return context.User(r.Context())
+				return context.UserFromContext(r.Context())
 			},
 		},
 	)
