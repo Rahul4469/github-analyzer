@@ -291,9 +291,11 @@ func getUserFromContext(r *http.Request) *models.User {
 	// TODO: Implement session/context user extraction
 	// This would get the user from the session or JWT token
 	// For now, returning nil (implement in V6 with authentication)
-	user, ok := r.Context().Value("user").(*models.User)
-	if !ok {
-		return nil
-	}
-	return user
+	// user, ok := r.Context().Value("user").(*models.User)
+	// if !ok {
+	// 	return nil
+	// }
+	// return user
+
+	return models.UserFromContext(r.Context())
 }
