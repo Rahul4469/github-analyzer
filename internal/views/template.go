@@ -11,20 +11,22 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 )
 
 var TemplateFS fs.FS
 
+// Template wraps a parsed template with helper methods for rendering.
 type Template struct {
 	tmpl *template.Template
 }
 
+// TemplateData is the standard data structure passed to all templates.
+// It contains common fields that every page might need.
 type TemplateData struct {
+	// Current authenticated user (nil if not logged in)
 	CurrentUser interface{}
 
+	// CSRF token for forms
 	CSRFToken string
 
 	// Flash messages
@@ -53,7 +55,7 @@ func DefaultFuncMap() template.FuncMap {
 		// String manipulation
 		"upper":    strings.ToUpper,
 		"lower":    strings.ToLower,
-		"title":    Title, // implemented this method down (string.Title - deprecated)
+		"title":    strings.Title,
 		"trim":     strings.TrimSpace,
 		"truncate": truncate,
 
@@ -103,10 +105,18 @@ func DefaultFuncMap() template.FuncMap {
 	}
 }
 
-// parses templates from the embeded filesystem.
-// NOTE: this implementation auto-includes the base layout and any partials.
+// ParseFS parses templates from the embedded filesystem.
+// It automatically includes the base layout and any partials.
+//
+// Usage:
+//
+//	tmpl, err := views.ParseFS("pages/home.gohtml")
+//	// This will parse:
+//	// - templates/layouts/base.gohtml
+//	// - templates/partials/*.gohtml
+//	// - templates/pages/home.gohtml
 func ParseFS(patterns ...string) (*Template, error) {
-	// start with function map
+	// Start with function map
 	tmpl := template.New("").Funcs(DefaultFuncMap())
 
 	// Parse base layout first
@@ -163,7 +173,7 @@ func ParseFS(patterns ...string) (*Template, error) {
 }
 
 // MustParseFS is like ParseFS but panics on error.
-// to be used during initialization when templates must be valid.
+// Use this during initialization when templates must be valid.
 func MustParseFS(patterns ...string) *Template {
 	tmpl, err := ParseFS(patterns...)
 	if err != nil {
@@ -219,12 +229,7 @@ func (t *Template) ExecuteHTTPWithStatus(w http.ResponseWriter, r *http.Request,
 	buf.WriteTo(w)
 }
 
-// Template function implementations -----------------------------------
-
-func Title(s string) string {
-	c := cases.Title(language.Und)
-	return c.String(strings.ToLower(strings.TrimSpace(s)))
-}
+// Template function implementations
 
 func truncate(s string, length int) string {
 	if len(s) <= length {

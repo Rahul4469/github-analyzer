@@ -1,302 +1,351 @@
 package controllers
 
 import (
-	"context"
-	"errors"
 	"fmt"
+	"log"
 	"net/http"
-	"strings"
-	"time"
+	"strconv"
 
-	localcontext "github.com/rahul4469/github-analyzer/context"
+	"github.com/go-chi/chi/v5"
+	"github.com/gorilla/csrf"
+	"github.com/rahul4469/github-analyzer/internal/crypto"
+	"github.com/rahul4469/github-analyzer/internal/middleware"
 	"github.com/rahul4469/github-analyzer/internal/models"
 	"github.com/rahul4469/github-analyzer/internal/services"
+	"github.com/rahul4469/github-analyzer/internal/views"
 )
 
+// AnalyzeController handles repository analysis.
 type AnalyzeController struct {
-	UserService      *models.UserService
-	RepoService      *models.RepositoryService
-	AnalysisService  *models.AnalysisService
-	GitHubFetcher    *services.GitHubFetcher
-	AIAnalyzer       *services.AIAnalyzer
-	DataFormatter    *services.DataFormatter
-	TemplateRenderer TemplateRenderer
+	analysisService   *models.AnalysisService
+	repositoryService *models.RepositoryService
+	userService       *models.UserService
+	githubService     *services.GitHubService
+	perplexityService *services.PerplexityService
+	encryptor         *crypto.Encryptor
+	templates         AnalyzeTemplates
+	maxFilesToFetch   int
 }
 
-// Constructor: create a new analyze controller
+// AnalyzeTemplates holds the templates for analysis pages.
+type AnalyzeTemplates struct {
+	Form   *views.Template
+	Result *views.Template
+}
+
+// NewAnalyzeController creates a new AnalyzeController.
 func NewAnalyzeController(
-	userService *models.UserService,
-	repoService *models.RepositoryService,
 	analysisService *models.AnalysisService,
-	githubFetcher *services.GitHubFetcher,
-	aiAnalyzer *services.AIAnalyzer,
-	dataFormatter *services.DataFormatter,
-	templateRenderer TemplateRenderer,
+	repositoryService *models.RepositoryService,
+	userService *models.UserService,
+	githubService *services.GitHubService,
+	perplexityService *services.PerplexityService,
+	encryptor *crypto.Encryptor,
+	templates AnalyzeTemplates,
 ) *AnalyzeController {
 	return &AnalyzeController{
-		UserService:      userService,
-		RepoService:      repoService,
-		AnalysisService:  analysisService,
-		GitHubFetcher:    githubFetcher,
-		AIAnalyzer:       aiAnalyzer,
-		DataFormatter:    dataFormatter,
-		TemplateRenderer: templateRenderer,
+		analysisService:   analysisService,
+		repositoryService: repositoryService,
+		userService:       userService,
+		githubService:     githubService,
+		perplexityService: perplexityService,
+		encryptor:         encryptor,
+		templates:         templates,
+		maxFilesToFetch:   15,
 	}
 }
 
-// AnalyzeRequest stores form submission data from user
-type AnalyzeRequest struct {
-	RepositoryURL string `form:"repository"`
-	GitHubToken   string `form:"github_token"`
+// AnalyzeFormData holds data for the analyze form template.
+type AnalyzeFormData struct {
+	RepoURL         string
+	GitHubConnected bool
+	GitHubUsername  string
 }
 
-// AnalyzeResponse stores analysis result
-type AnalyzeResponse struct {
-	RepositoryID int64
-	AnalysisID   int
-	Success      bool
-	Message      string
-	Error        string
-}
+// GetAnalyze renders the analysis form.
+func (c *AnalyzeController) GetAnalyze(w http.ResponseWriter, r *http.Request) {
+	user := middleware.MustCurrentUser(r)
 
-// Render User input form page (GET/ analyze)
-func (ac *AnalyzeController) GetAnalyzeForm(w http.ResponseWriter, r *http.Request) {
-	// get user from session/context
-	user := getUserFromContext(r)
-	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+	// Check quota
+	if user.RemainingQuota() <= 0 {
+		http.Redirect(w, r, "/dashboard?error=Quota+exceeded", http.StatusSeeOther)
 		return
 	}
 
-	// Data to pass to template
-	data := map[string]interface{}{
-		"Title": "Analyze Repository",
-		"User":  user,
+	// Check if GitHub is connected
+	githubConnected := user.HasGitHubConnected()
+	var githubUsername string
+	if user.GitHubUsername != nil {
+		githubUsername = *user.GitHubUsername
 	}
 
-	// Render template
-	if err := ac.TemplateRenderer.Render(w, "analyze.gohtml", data); err != nil {
-		http.Error(w, "Failed to render form", http.StatusInternalServerError)
-		return
+	data := &views.TemplateData{
+		Title:       "Analyze Repository",
+		CSRFToken:   csrf.Token(r),
+		CurrentUser: user,
+		Data: AnalyzeFormData{
+			GitHubConnected: githubConnected,
+			GitHubUsername:  githubUsername,
+		},
 	}
+
+	// If GitHub not connected, show warning
+	if !githubConnected {
+		data.Warning = "Please connect your GitHub account first to analyze repositories."
+	}
+
+	c.templates.Form.ExecuteHTTP(w, r, data)
 }
 
-// Process analyze form submission (POSt /analyze)
-func (ac *AnalyzeController) PostAnalyze(w http.ResponseWriter, r *http.Request) {
-	// get user from session/context
-	user := getUserFromContext(r) // TODO
-	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
+// PostAnalyze handles the analysis form submission.
+func (c *AnalyzeController) PostAnalyze(w http.ResponseWriter, r *http.Request) {
+	user := middleware.MustCurrentUser(r)
 
-	// Parse Form
 	if err := r.ParseForm(); err != nil {
-		ac.respondWithError(w, r, "Invalud Form submissions", http.StatusBadRequest)
+		c.renderFormError(w, r, user, "", "Invalid form data")
 		return
 	}
 
-	// Extract formValue
-	req := AnalyzeRequest{
-		RepositoryURL: strings.TrimSpace(r.FormValue("repository")),
-		GitHubToken:   strings.TrimSpace(r.FormValue("github_token")),
-	}
+	repoURL := r.FormValue("repo_url")
 
-	// Validate Input : guthub token + repo url from user are they avaliable request body or not
-	if validationErr := ac.validateRequest(&req); validationErr != nil {
-		ac.respondWithError(w, r, validationErr.Error(), http.StatusBadRequest)
+	// Validate inputs
+	if repoURL == "" {
+		c.renderFormError(w, r, user, repoURL, "Repository URL is required")
 		return
 	}
 
-	// CREATE BASE CONTEXT WITH TIMEOUT
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-
-	// Validate Github Token format
-	tempFetcher := services.NewGitHubFetcher(req.GitHubToken)
-	if !tempFetcher.IsValidToken(req.GitHubToken) {
-		ac.respondWithError(w, r, "Invalid GitHub token format", http.StatusBadRequest)
+	// Check if GitHub is connected
+	if !user.HasGitHubConnected() {
+		c.renderFormError(w, r, user, repoURL, "Please connect your GitHub account first")
 		return
 	}
 
-	// Fetch repo data from GitHub
-	repoData, err := ac.fetchRepositoryData(ctx, req)
+	// Get and decrypt the GitHub token
+	encryptedToken, err := c.userService.GetGitHubToken(r.Context(), user.ID)
+	if err != nil || encryptedToken == "" {
+		c.renderFormError(w, r, user, repoURL, "GitHub token not found. Please reconnect your GitHub account.")
+		return
+	}
+
+	githubToken, err := c.encryptor.Decrypt(encryptedToken)
 	if err != nil {
-		ac.respondWithError(w, r, fmt.Sprintf("Failed to fetch repository: %v", err), http.StatusBadRequest)
+		log.Printf("Failed to decrypt GitHub token: %v", err)
+		c.renderFormError(w, r, user, repoURL, "Failed to access GitHub token. Please reconnect your GitHub account.")
 		return
 	}
 
-	// First Chekc user's API quota then send the data to AI for analysis
-	hasQuota, err := ac.UserService.CheckQuotaAvailable(ctx, user.ID)
-	if err != nil || !hasQuota {
-		ac.respondWithError(w, r, "API quota exceeded. Please try again later.", http.StatusTooManyRequests)
-		return
-	}
-
-	// Analyze code with pplx (but first Format data using DataFormatter)
-	formattedData := ac.DataFormatter.FormatRepositoryDataForAnalysis(repoData)
-	rawAnalysis, err := ac.analyzeCode(ctx, formattedData)
+	// Parse and validate GitHub URL
+	owner, repo, err := models.ParseGitHubURL(repoURL)
 	if err != nil {
-		ac.respondWithError(w, r, fmt.Sprintf("Analysis failed: %v", err), http.StatusInternalServerError)
+		c.renderFormError(w, r, user, repoURL, "Invalid GitHub repository URL. Use format: https://github.com/owner/repo")
 		return
 	}
 
-	// Extract scrores from analysis
-	scores := ac.AIAnalyzer.ExtractScores(rawAnalysis)
-	issueCount := ac.AIAnalyzer.CountIssues(rawAnalysis)
-	summary := ac.DataFormatter.SummarizeAnalysis(rawAnalysis)
+	// Check user quota
+	if user.RemainingQuota() <= 0 {
+		c.renderFormError(w, r, user, repoURL, "You have exceeded your API quota. Please contact support.")
+		return
+	}
 
-	// Save repository to db
-	repository := &models.Repository{
+	// Perform the analysis
+	analysisID, err := c.performAnalysis(r, user, owner, repo, repoURL, githubToken)
+	if err != nil {
+		log.Printf("Analysis failed for %s/%s: %v", owner, repo, err)
+		c.renderFormError(w, r, user, repoURL, fmt.Sprintf("Analysis failed: %v", err))
+		return
+	}
+
+	// Redirect to results page
+	http.Redirect(w, r, fmt.Sprintf("/analyze/%d", analysisID), http.StatusSeeOther)
+}
+
+// performAnalysis executes the full analysis pipeline.
+func (c *AnalyzeController) performAnalysis(r *http.Request, user *models.User, owner, repo, repoURL, githubToken string) (int64, error) {
+	ctx := r.Context()
+
+	// Step 1: Fetch repository metadata from GitHub
+	log.Printf("Fetching repository metadata for %s/%s", owner, repo)
+	repoInfo, err := c.githubService.GetRepository(ctx, owner, repo, githubToken)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch repository: %w", err)
+	}
+
+	// Step 2: Create or update repository record
+	repoModel := &models.Repository{
 		UserID:          user.ID,
-		FullName:        repoData.Repository.GetFullName(),
-		Owner:           repoData.Repository.GetOwner().GetLogin(),
-		Name:            repoData.Repository.GetName(),
-		URL:             repoData.Repository.GetHTMLURL(),
-		Description:     repoData.Repository.GetDescription(),
-		StarsCount:      repoData.Repository.GetStargazersCount(),
-		ForksCount:      repoData.Repository.GetForksCount(),
-		WatchersCount:   repoData.Repository.GetWatchersCount(),
-		OpenIssuesCount: repoData.Repository.GetOpenIssuesCount(),
-		PrimaryLanguage: repoData.Repository.GetLanguage(),
+		GitHubURL:       repoURL,
+		Owner:           owner,
+		Name:            repo,
+		Description:     &repoInfo.Description,
+		PrimaryLanguage: &repoInfo.Language,
+		StarsCount:      repoInfo.StargazersCount,
+		ForksCount:      repoInfo.ForksCount,
 	}
-	savedRepo, err := ac.RepoService.Create(ctx, repository)
-	if err != nil && !strings.Contains(err.Error(), "duplicate") {
-		ac.respondWithError(w, r, "Failed to save repository", http.StatusInternalServerError)
+
+	savedRepo, err := c.repositoryService.Create(ctx, repoModel)
+	if err != nil {
+		return 0, fmt.Errorf("failed to save repository: %w", err)
+	}
+
+	// Step 3: Create analysis record
+	analysis, err := c.analysisService.Create(ctx, user.ID, savedRepo.ID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create analysis: %w", err)
+	}
+
+	// Step 4: Mark as processing
+	if err := c.analysisService.MarkProcessing(ctx, analysis.ID); err != nil {
+		log.Printf("Failed to mark analysis as processing: %v", err)
+	}
+
+	// Step 5: Fetch actual code files (THE ENHANCED FEATURE!)
+	log.Printf("Fetching source code files for %s/%s", owner, repo)
+	codeFiles, codeStructure, err := c.githubService.GetRepositoryFiles(ctx, owner, repo, githubToken, c.maxFilesToFetch)
+	if err != nil {
+		_ = c.analysisService.Fail(ctx, analysis.ID, fmt.Sprintf("Failed to fetch code: %v", err))
+		return 0, fmt.Errorf("failed to fetch code files: %w", err)
+	}
+	log.Printf("Fetched %d code files for analysis", len(codeFiles))
+
+	// Step 6: Fetch README
+	readme, _ := c.githubService.GetREADME(ctx, owner, repo, githubToken)
+
+	// Step 7: Store GitHub data
+	if err := c.analysisService.UpdateGitHubData(ctx, analysis.ID, codeStructure, codeFiles, readme); err != nil {
+		log.Printf("Failed to store GitHub data: %v", err)
+	}
+
+	// Step 8: Send to Perplexity AI for analysis
+	log.Printf("Sending %d files to Perplexity AI for analysis", len(codeFiles))
+	aiInput := services.AnalysisInput{
+		RepoName:        repo,
+		RepoOwner:       owner,
+		Description:     repoInfo.Description,
+		PrimaryLanguage: repoInfo.Language,
+		README:          readme,
+		CodeStructure:   codeStructure,
+		CodeFiles:       codeFiles, // THE ACTUAL CODE!
+	}
+
+	aiResult, err := c.perplexityService.Analyze(ctx, aiInput)
+	if err != nil {
+		_ = c.analysisService.Fail(ctx, analysis.ID, fmt.Sprintf("AI analysis failed: %v", err))
+		return 0, fmt.Errorf("AI analysis failed: %w", err)
+	}
+	log.Printf("AI analysis completed, found %d issues, used %d tokens", len(aiResult.Issues), aiResult.TokensUsed)
+
+	// Step 9: Store results
+	if err := c.analysisService.Complete(ctx, analysis.ID, aiResult.RawAnalysis, aiResult.Summary, aiResult.Issues, aiResult.TokensUsed); err != nil {
+		return 0, fmt.Errorf("failed to store results: %w", err)
+	}
+
+	// Step 10: Update user quota
+	if err := c.userService.UpdateAPIQuota(ctx, user.ID, aiResult.TokensUsed); err != nil {
+		log.Printf("Failed to update user quota: %v", err)
+	}
+
+	return analysis.ID, nil
+}
+
+// renderFormError renders the form with an error message.
+func (c *AnalyzeController) renderFormError(w http.ResponseWriter, r *http.Request, user *models.User, repoURL, errMsg string) {
+	// Get GitHub connection status
+	githubConnected := user.HasGitHubConnected()
+	var githubUsername string
+	if user.GitHubUsername != nil {
+		githubUsername = *user.GitHubUsername
+	}
+
+	data := &views.TemplateData{
+		Title:       "Analyze Repository",
+		CSRFToken:   csrf.Token(r),
+		CurrentUser: user,
+		Error:       errMsg,
+		Data: AnalyzeFormData{
+			RepoURL:         repoURL,
+			GitHubConnected: githubConnected,
+			GitHubUsername:  githubUsername,
+		},
+	}
+	c.templates.Form.ExecuteHTTPWithStatus(w, r, http.StatusUnprocessableEntity, data)
+}
+
+// AnalysisResultData holds data for the result template.
+type AnalysisResultData struct {
+	Analysis *models.Analysis
+}
+
+// GetResult renders the analysis results page.
+func (c *AnalyzeController) GetResult(w http.ResponseWriter, r *http.Request) {
+	user := middleware.MustCurrentUser(r)
+
+	// Get analysis ID from URL
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid analysis ID", http.StatusBadRequest)
 		return
 	}
 
-	// Use Existing repo if duplicate
-	if savedRepo == nil {
-		savedRepo, _ = ac.RepoService.GetByFullName(ctx, user.ID, repository.FullName)
-	}
-
-	// Save analysis to database
-	analysis := &models.Analysis{
-		RepositoryID:         savedRepo.ID,
-		CodeQualityScore:     getScore(scores, "Quality Score"),
-		SecurityScore:        getScore(scores, "Security Score"),
-		ComplexityScore:      getScore(scores, "Complexity Score"),
-		MaintainabilityScore: getScore(scores, "Maintainability Score"),
-		PerformanceScore:     getScore(scores, "Performance Score"),
-		TotalIssues:          issueCount,
-		CriticalIssues:       countIssueSeverity(rawAnalysis, "critical"),
-		HighIssues:           countIssueSeverity(rawAnalysis, "high"),
-		MediumIssues:         countIssueSeverity(rawAnalysis, "medium"),
-		LowIssues:            countIssueSeverity(rawAnalysis, "low"),
-		Summary:              summary,
-		RawAnalysis:          rawAnalysis,
-	}
-
-	savedAnalysis, err := ac.AnalysisService.Create(ctx, analysis)
+	// Fetch analysis
+	analysis, err := c.analysisService.ByID(r.Context(), id)
 	if err != nil {
-		ac.respondWithError(w, r, "Failed to save analysis", http.StatusInternalServerError)
+		if err == models.ErrAnalysisNotFound {
+			http.Error(w, "Analysis not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "Failed to load analysis", http.StatusInternalServerError)
 		return
 	}
 
-	// Update user quota
-	_ = ac.UserService.UpdateQuota(ctx, user.ID, user.APIQuotaUsed+1)
+	// Verify ownership
+	if analysis.UserID != user.ID {
+		http.Error(w, "Access denied", http.StatusForbidden)
+		return
+	}
 
-	// Redirect to dhashboard
-	redirectURL := fmt.Sprintf("/dashboard/%d", savedAnalysis.ID)
-	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
+	data := &views.TemplateData{
+		Title:       fmt.Sprintf("Analysis: %s", analysis.Repository.FullName()),
+		CSRFToken:   csrf.Token(r),
+		CurrentUser: user,
+		Data: AnalysisResultData{
+			Analysis: analysis,
+		},
+	}
+
+	c.templates.Result.ExecuteHTTP(w, r, data)
 }
 
-// fetchRepository handler fetches all repo data from GitHub (using the guthub service)
-func (ac *AnalyzeController) fetchRepositoryData(ctx context.Context, req AnalyzeRequest) (*services.RepositoryData, error) {
-	// Create Github fetcher with user's token
-	fetcher := services.NewGitHubFetcher(req.GitHubToken)
+// DeleteAnalysis handles analysis deletion.
+func (c *AnalyzeController) DeleteAnalysis(w http.ResponseWriter, r *http.Request) {
+	user := middleware.MustCurrentUser(r)
 
-	// Fetch repository
-	repoData, err := fetcher.FetchRepository(ctx, req.RepositoryURL)
+	// Get analysis ID from URL
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch repository: %w", err)
+		http.Error(w, "Invalid analysis ID", http.StatusBadRequest)
+		return
 	}
 
-	if repoData == nil || repoData.Repository == nil {
-		return nil, errors.New("repository not found")
-	}
-
-	return repoData, nil
-}
-
-// analyzeCode sends code data to pplx for analysis
-func (ac *AnalyzeController) analyzeCode(ctx context.Context, codeData string) (string, error) {
-	analysis, err := ac.AIAnalyzer.AnalyzeCode(ctx, codeData)
+	// Fetch analysis to verify ownership
+	analysis, err := c.analysisService.ByID(r.Context(), id)
 	if err != nil {
-		return "", fmt.Errorf("AI analysis failed: %w", err)
+		http.Redirect(w, r, "/dashboard?error=Analysis+not+found", http.StatusSeeOther)
+		return
 	}
 
-	if analysis == "" {
-		return "", errors.New("empty analysis reposnse")
+	// Verify ownership
+	if analysis.UserID != user.ID {
+		http.Redirect(w, r, "/dashboard?error=Access+denied", http.StatusSeeOther)
+		return
 	}
 
-	return analysis, nil
-}
-
-// HELPER FUNCTIONS ------------------------------------------
-
-// Validate the user input field data (repo url & github token).
-// validates for their presence in the request body
-func (ac *AnalyzeController) validateRequest(req *AnalyzeRequest) error {
-	if req.RepositoryURL == "" {
-		return errors.New("repository URL is required")
+	// Delete
+	if err := c.analysisService.Delete(r.Context(), id); err != nil {
+		http.Redirect(w, r, "/dashboard?error=Failed+to+delete", http.StatusSeeOther)
+		return
 	}
 
-	// validate repo url format (owner/repo)
-	parts := strings.Split(req.RepositoryURL, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return errors.New("invalid repository format: use owner/repo (e.g., golang/go)")
-	}
-
-	if req.GitHubToken == "" {
-		return errors.New("GitHub token is required")
-	}
-	if len(req.GitHubToken) < 30 {
-		return errors.New("GitHub token appears to be invalid")
-	}
-	return nil
-}
-
-// Error handler to pass error response data to the Renderer.
-// Set default data & error message and render
-func (ac *AnalyzeController) respondWithError(w http.ResponseWriter, r *http.Request, message string, statusCode int) {
-	user := getUserFromContext(r)
-
-	data := map[string]interface{}{
-		"Title": "Analyze Repository",
-		"User":  user,
-		"Error": message,
-	}
-	w.WriteHeader(statusCode)
-	_ = ac.TemplateRenderer.Render(w, "analyze.gohtml", data)
-}
-
-// search the "key" string from the analysed "scores" Map and return its value as score
-func getScore(scores map[string]int, key string) int {
-	if score, exists := scores[key]; exists {
-		return score
-	}
-	return 50 // Default
-}
-
-func countIssueSeverity(analysis string, severity string) int {
-	count := strings.Count(analysis, severity)
-	if count > 100 {
-		count = 100 // Cap at 100
-	}
-	return count
-}
-
-func getUserFromContext(r *http.Request) *models.User {
-	// TODO: Implement session/context user extraction
-	// This would get the user from the session or JWT token
-	// For now, returning nil (implement in V6 with authentication)
-	// user, ok := r.Context().Value("user").(*models.User)
-	// if !ok {
-	// 	return nil
-	// }
-	// return user
-
-	return localcontext.UserFromContext(r.Context())
+	http.Redirect(w, r, "/dashboard?success=Analysis+deleted", http.StatusSeeOther)
 }

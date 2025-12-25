@@ -23,6 +23,9 @@ type Config struct {
 	// PPLX API config
 	APIs APIConfig
 
+	// GitHub OAuth settings
+	GitHubOAuth GitHubOAuthConfig
+
 	// feature flags and limits
 	Limits LimitsConfig
 }
@@ -45,7 +48,8 @@ type SecurityConfig struct {
 	SessionCookieName string
 	SessionDuration   time.Duration
 	BcryptCost        int
-	SecureCookies     bool // true in production
+	SecureCookies     bool   // true in production
+	EncryptionKey     string // 32-byte key for AES-256 encryption
 }
 
 // APIConfig holds external API configuration.
@@ -53,6 +57,14 @@ type APIConfig struct {
 	PerplexityAPIKey string
 	PerplexityModel  string
 	GitHubAPIBaseURL string
+}
+
+// GitHubOAuthConfig holds GitHub OAuth2 settings.
+type GitHubOAuthConfig struct {
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	Scopes       []string
 }
 
 // LimitsConfig holds rate limiting and quota settings.
@@ -108,6 +120,7 @@ func Load() (*Config, error) {
 		SessionDuration:   time.Duration(sessionHours) * time.Hour,
 		BcryptCost:        bcryptCost,
 		SecureCookies:     cfg.Server.Environment == "production",
+		EncryptionKey:     os.Getenv("ENCRYPTION_KEY"),
 	}
 
 	// Load API configuration
@@ -115,6 +128,14 @@ func Load() (*Config, error) {
 		PerplexityAPIKey: os.Getenv("PERPLEXITY_API_KEY"),
 		PerplexityModel:  getEnvOrDefault("PERPLEXITY_MODEL", "llama-3.1-sonar-large-128k-online"),
 		GitHubAPIBaseURL: getEnvOrDefault("GITHUB_API_BASE_URL", "https://api.github.com"),
+	}
+
+	// Load GitHub OAuth configuration
+	cfg.GitHubOAuth = GitHubOAuthConfig{
+		ClientID:     os.Getenv("GITHUB_CLIENT_ID"),
+		ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
+		RedirectURL:  getEnvOrDefault("GITHUB_REDIRECT_URL", cfg.Server.BaseURL+"/auth/github/callback"),
+		Scopes:       []string{"repo", "read:user", "user:email"},
 	}
 
 	// Load limits configuration
@@ -162,6 +183,14 @@ func (c *Config) validate() error {
 	// Perplexity API key is required for analysis features
 	if c.APIs.PerplexityAPIKey == "" {
 		errs = append(errs, errors.New("PERPLEXITY_API_KEY is required"))
+	}
+
+	// GitHub OAuth credentials are required
+	if c.GitHubOAuth.ClientID == "" {
+		errs = append(errs, errors.New("GITHUB_CLIENT_ID is required"))
+	}
+	if c.GitHubOAuth.ClientSecret == "" {
+		errs = append(errs, errors.New("GITHUB_CLIENT_SECRET is required"))
 	}
 
 	// Validate bcrypt cost is in reasonable range
