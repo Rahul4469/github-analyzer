@@ -2,85 +2,87 @@ package models
 
 import (
 	"context"
-	"database/sql"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type User struct {
-	ID           int            `json:"id"`
-	Username     string         `json:"username"`
-	Email        string         `json:"email"`
-	PasswordHash string         `json:"-"`
-	GitHubToken  sql.NullString `json:"-"`
-	// GitHub Info
-	GitHubUsername sql.NullString
-	AvatarURL      sql.NullString
-	APIQuotaUsed   int        `json:"api_quota_used"`
-	APIQuotaLimit  int        `json:"api_quota_limit"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	LastLogin      *time.Time `json:"last_login,omitempty"`
+	ID              int64     `json:"id"`
+	Email           string    `json:"email"`
+	PasswordHash    string    `json:"-"`
+	GitHubTokenHash *string   `json:"-"`
+	APIQuotaUsed    int       `json:"api_quota_used"`
+	APIQuotaLimit   int       `json:"api_quota_limit"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type UserService struct {
-	DB *sql.DB
+	pool       *pgxpool.Pool
+	bcryptCost int
 }
 
-func NewUserService(db *sql.DB) *UserService {
-	return &UserService{DB: db}
+// NewUserService creates a new UserService.
+// bcryptCost should be 12-14 for production (higher = slower but more secure).
+func NewUserService(pool *pgxpool.Pool, bcryptCost int) *UserService {
+	return &UserService{
+		pool:       pool,
+		bcryptCost: bcryptCost,
+	}
 }
 
-// Create user from Auth, Email/password signup
-func (us *UserService) Create(email, password string) (*User, error) {
-	// Validate input
+func (s *UserService) Create(ctx context.Context, email, password string, defaultQuota int) (*User, error) {
+	// Validate inputs
 	email = strings.TrimSpace(strings.ToLower(email))
-	if email == "" {
-		return nil, fmt.Errorf("email is required")
-	}
-	if password == "" {
-		return nil, fmt.Errorf("password is required")
-	}
-	if len(password) < 8 {
-		return nil, fmt.Errorf("password must be at least 8 characters")
+	if !isValidEmail(email) {
+		return nil, ErrInvalidEmail
 	}
 
-	// Hash password using bcrypt
-	hashedBytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if len(password) < 8 {
+		return nil, ErrPasswordTooShort
+	}
+
+	// Hash password with bcrypt
+	// bcrypt automatically generates a salt and includes it in the hash
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), s.bcryptCost)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	// Create user object
-	user := &User{
-		Email:        email,
-		Username:     email, // Default username to email
-		PasswordHash: string(hashedBytes),
-	}
-
-	// Insert into database
+	// Insert user into database
+	user := &User{}
 	query := `
-		INSERT INTO users (email, username, password_hash, api_quota_used, api_quota_limit, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-		RETURNING id, created_at, updated_at
+		INSERT INTO users (email, password_hash, api_quota_limit)
+		VALUES ($1, $2, $3)
+		RETURNING id, email, password_hash, github_token_hash, api_quota_used, api_quota_limit, created_at, updated_at
 	`
 
-	err = us.DB.QueryRow(
-		query,
-		user.Email,
-		user.Username,
-		user.PasswordHash,
-		0,    // api_quota_used
-		1000, // api_quota_limit (default)
-	).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	err = s.pool.QueryRow(ctx, query, email, string(hashedPassword), defaultQuota).Scan(
+		&user.ID,
+		&user.Email,
+		&user.PasswordHash,
+		&user.GitHubTokenHash,
+		&user.APIQuotaUsed,
+		&user.APIQuotaLimit,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
 
 	if err != nil {
-		// Check for duplicate email
+		// Check for unique constraint violation (duplicate email)
 		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique constraint") {
-			return nil, fmt.Errorf("email already registered")
+			return nil, ErrEmailAlreadyExists
 		}
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
@@ -88,285 +90,248 @@ func (us *UserService) Create(email, password string) (*User, error) {
 	return user, nil
 }
 
-// Create user from GitHub API response
-func (us *UserService) CreateFromGithub(ctx context.Context, user *User) (*User, error) {
-	// Validate input
-	if user.Username == "" || user.Email == "" {
-		return nil, fmt.Errorf("username, email are required")
-	}
-	if !user.GitHubToken.Valid || user.GitHubToken.String == "" {
-		return nil, fmt.Errorf("github_token is required")
-	}
-	// Normalize email
-	user.Email = strings.ToLower(strings.TrimSpace(user.Email))
+func (s *UserService) Authenticate(ctx context.Context, email, password string) (*User, error) {
+	email = strings.TrimSpace(strings.ToLower(email))
 
-	// Insert user
-	err := us.DB.QueryRowContext(
-		ctx,
-		`INSERT INTO users (
-			username, email, password_hash, github_token,
-			github_username, avatar_url, api_quota_used, api_quota_limit,
-			created_at, updated_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
-		RETURNING id, created_at, updated_at`,
-		user.Username, user.Email, "", user.GitHubToken.String,
-		user.GitHubUsername.String,
-		user.AvatarURL.String, 0, 1000, // Default quota
-	).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
-
+	user, err := s.ByEmail(ctx, email)
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique constraint") {
-			return nil, fmt.Errorf("user already exists")
+		if errors.Is(err, ErrUserNotFound) {
+			// Don't reveal that email doesn't exist
+			// Also do a dummy bcrypt compare to prevent timing attacks
+			_ = bcrypt.CompareHashAndPassword([]byte("$2a$12$dummy.hash.to.prevent.timing.attacks"), []byte(password))
+			return nil, ErrInvalidCredentials
 		}
-		return nil, fmt.Errorf("failed to create user: %w", err)
+		return nil, err
+	}
+
+	// Compare password with stored hash
+	// bcrypt.CompareHashAndPassword is constant-time
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
+	if err != nil {
+		return nil, ErrInvalidCredentials
 	}
 
 	return user, nil
 }
 
-// For both Auth methods, Retrieve user from database by ID
-func (us *UserService) ByID(id int) (*User, error) {
+// ByID retrieves a user by their ID.
+// Returns ErrUserNotFound if no user exists with that ID.
+func (s *UserService) ByID(ctx context.Context, id int64) (*User, error) {
 	query := `
-		SELECT id, email, username, password_hash, github_token,
-		       github_username, avatar_url, api_quota_used, api_quota_limit,
-		       created_at, updated_at
+		SELECT id, email, password_hash, github_token_hash, api_quota_used, api_quota_limit, created_at, updated_at
 		FROM users
 		WHERE id = $1
 	`
 
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
 	user := &User{}
-	err := us.DB.QueryRow(query, id).Scan(
-		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
-		&user.GitHubToken, &user.GitHubUsername, &user.AvatarURL,
-		&user.APIQuotaUsed, &user.APIQuotaLimit,
-		&user.CreatedAt, &user.UpdatedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("user not found")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to query user: %w", err)
-	}
-
-	return user, nil
-}
-
-// GetByID retrieves a user by their ID
-func (us *UserService) GetByID(ctx context.Context, id int) (*User, error) {
-	var user User
-
-	err := us.DB.QueryRowContext(
-		ctx,
-		`SELECT id, username, email, password_hash, github_token,
-		        api_quota_used, api_quota_limit, created_at, updated_at, last_login
-		 FROM users WHERE id = $1`,
-		id,
-	).Scan(
-		&user.ID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.GitHubToken, &user.APIQuotaUsed, &user.APIQuotaLimit,
-		&user.CreatedAt, &user.UpdatedAt, &user.LastLogin,
+	err := s.pool.QueryRow(ctx, query, id).Scan(
+		&user.ID,
+		&user.Email,
+		&user.PasswordHash,
+		&user.GitHubTokenHash,
+		&user.APIQuotaUsed,
+		&user.APIQuotaLimit,
+		&user.CreatedAt,
+		&user.UpdatedAt,
 	)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("user not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
 		}
-		return nil, fmt.Errorf("failed to fetch user: %w", err)
-	}
-
-	return &user, nil
-}
-
-// GetByUsername retrieves a user by their username
-func (us *UserService) GetByGitHubUsername(ctx context.Context, username string) (*User, error) {
-	query := `
-		SELECT id, email, username, password_hash, github_token,
-		       github_username, avatar_url, api_quota_used, api_quota_limit,
-		       created_at, updated_at
-		FROM users
-		WHERE github_username = $1
-	`
-
-	user := &User{}
-	err := us.DB.QueryRowContext(ctx, query, username).Scan(
-		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
-		&user.GitHubToken, &user.GitHubUsername, &user.AvatarURL,
-		&user.APIQuotaUsed, &user.APIQuotaLimit,
-		&user.CreatedAt, &user.UpdatedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		return nil, nil // Not found is not an error for OAuth
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to query user: %w", err)
+		return nil, fmt.Errorf("failed to get user by ID: %w", err)
 	}
 
 	return user, nil
 }
 
-// Email/password login
-func (us *UserService) Authenticate(email, password string) (*User, error) {
-	// Normalize email
+// ByEmail retrieves a user by their email address.
+// Returns ErrUserNotFound if no user exists with that email.
+func (s *UserService) ByEmail(ctx context.Context, email string) (*User, error) {
 	email = strings.TrimSpace(strings.ToLower(email))
 
-	// Get user from database
 	query := `
-		SELECT id, email, username, password_hash, api_quota_used, api_quota_limit, created_at, updated_at
+		SELECT id, email, password_hash, github_token_hash, api_quota_used, api_quota_limit, created_at, updated_at
 		FROM users
 		WHERE email = $1
 	`
 
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
 	user := &User{}
-	err := us.DB.QueryRow(query, email).Scan(
-		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
-		&user.APIQuotaUsed, &user.APIQuotaLimit,
-		&user.CreatedAt, &user.UpdatedAt,
+	err := s.pool.QueryRow(ctx, query, email).Scan(
+		&user.ID,
+		&user.Email,
+		&user.PasswordHash,
+		&user.GitHubTokenHash,
+		&user.APIQuotaUsed,
+		&user.APIQuotaLimit,
+		&user.CreatedAt,
+		&user.UpdatedAt,
 	)
 
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("invalid email or password")
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to query user: %w", err)
-	}
-
-	// Verify password
-	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
-	if err != nil {
-		return nil, fmt.Errorf("invalid email or password")
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to get user by email: %w", err)
 	}
 
 	return user, nil
 }
 
-// GetByEmail retrieves a user by their email
-func (us *UserService) GetByEmail(ctx context.Context, email string) (*User, error) {
-	var user User
+// SetGitHubToken stores a hashed GitHub personal access token for the user.
+// The token is hashed with SHA256 before storage.
+func (s *UserService) SetGitHubToken(ctx context.Context, userID int64, token string) error {
+	tokenHash := hashToken(token)
 
-	err := us.DB.QueryRowContext(
-		ctx,
-		`SELECT id, username, email, password_hash, github_token,
-		        api_quota_used, api_quota_limit, created_at, updated_at, last_login
-		 FROM users WHERE email = $1`,
-		email,
-	).Scan(
-		&user.ID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.GitHubToken, &user.APIQuotaUsed, &user.APIQuotaLimit,
-		&user.CreatedAt, &user.UpdatedAt, &user.LastLogin,
-	)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("user not found")
-		}
-		return nil, fmt.Errorf("failed to fetch user: %w", err)
-	}
-
-	return &user, nil
-}
-
-// UpdateGitHubToken updates a user's GitHub token
-func (us *UserService) UpdateGitHubToken(id int, token string) error {
 	query := `
 		UPDATE users
-		SET github_token = $1, updated_at = NOW()
+		SET github_token_hash = $1, updated_at = NOW()
 		WHERE id = $2
 	`
 
-	result, err := us.DB.Exec(query, token, id)
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	result, err := s.pool.Exec(ctx, query, tokenHash, userID)
 	if err != nil {
-		return fmt.Errorf("failed to update token: %w", err)
+		return fmt.Errorf("failed to set GitHub token: %w", err)
 	}
 
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to check rows affected: %w", err)
-	}
-
-	if rows == 0 {
-		return fmt.Errorf("user not found")
+	if result.RowsAffected() == 0 {
+		return ErrUserNotFound
 	}
 
 	return nil
 }
 
-// UpdateLastLogin updates user's last login time
-func (us *UserService) UpdateLastLogin(ctx context.Context, userID int) error {
-	_, err := us.DB.ExecContext(
-		ctx,
-		`UPDATE users SET last_login = NOW()
-		 WHERE id = $1`,
-		userID,
-	)
+// ClearGitHubToken removes the stored GitHub token for a user.
+func (s *UserService) ClearGitHubToken(ctx context.Context, userID int64) error {
+	query := `
+		UPDATE users
+		SET github_token_hash = NULL, updated_at = NOW()
+		WHERE id = $1
+	`
 
-	return err
-}
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
 
-// Delete deletes a user from the database
-func (us *UserService) Delete(ctx context.Context, userID int) error {
-	result, err := us.DB.ExecContext(
-		ctx,
-		`DELETE FROM users WHERE id = $1`,
-		userID,
-	)
-
+	_, err := s.pool.Exec(ctx, query, userID)
 	if err != nil {
-		return fmt.Errorf("failed to delete user: %w", err)
+		return fmt.Errorf("failed to clear GitHub token: %w", err)
 	}
 
-	rows, err := result.RowsAffected()
+	return nil
+}
+
+// UpdateAPIQuota adds the specified number of tokens to the user's usage.
+// Returns an error if this would exceed their quota limit.
+func (s *UserService) UpdateAPIQuota(ctx context.Context, userID int64, tokensUsed int) error {
+	// First check if user has enough quota
+	user, err := s.ByID(ctx, userID)
 	if err != nil {
 		return err
 	}
 
-	if rows == 0 {
-		return fmt.Errorf("user not found")
+	if user.APIQuotaUsed+tokensUsed > user.APIQuotaLimit {
+		return fmt.Errorf("quota exceeded: would use %d tokens but limit is %d (currently used: %d)",
+			user.APIQuotaUsed+tokensUsed, user.APIQuotaLimit, user.APIQuotaUsed)
+	}
+
+	query := `
+		UPDATE users
+		SET api_quota_used = api_quota_used + $1, updated_at = NOW()
+		WHERE id = $2
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	_, err = s.pool.Exec(ctx, query, tokensUsed, userID)
+	if err != nil {
+		return fmt.Errorf("failed to update API quota: %w", err)
 	}
 
 	return nil
 }
 
-// UpdateQuota updates user's API quota usage
-func (us *UserService) UpdateQuota(ctx context.Context, userID int, used int) error {
-	result, err := us.DB.ExecContext(
-		ctx,
-		`UPDATE users SET api_quota_used = $1, updated_at = NOW()
-		 WHERE id = $2`,
-		used, userID,
-	)
+// ResetAPIQuota resets the user's API quota usage to zero.
+// Typically called at the start of a billing period.
+func (s *UserService) ResetAPIQuota(ctx context.Context, userID int64) error {
+	query := `
+		UPDATE users
+		SET api_quota_used = 0, updated_at = NOW()
+		WHERE id = $1
+	`
 
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	_, err := s.pool.Exec(ctx, query, userID)
 	if err != nil {
-		return fmt.Errorf("failed to update quota: %w", err)
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rows == 0 {
-		return fmt.Errorf("user not found")
+		return fmt.Errorf("failed to reset API quota: %w", err)
 	}
 
 	return nil
 }
 
-// CheckQuotaAvailable checks if user has API quota available
-func (us *UserService) CheckQuotaAvailable(ctx context.Context, userID int) (bool, error) {
-	var used, limit int
+// HELPRE FUNCTIONS ----------------------
 
-	err := us.DB.QueryRowContext(
-		ctx,
-		`SELECT api_quota_used, api_quota_limit FROM users WHERE id = $1`,
-		userID,
-	).Scan(&used, &limit)
+// HasGitHubToken returns true if the user has stored a GitHub token.
+func (u *User) HasGitHubToken() bool {
+	return u.GitHubTokenHash != nil && *u.GitHubTokenHash != ""
+}
 
-	if err != nil {
-		return false, fmt.Errorf("failed to check quota: %w", err)
+// RemainingQuota returns how many API tokens the user can still use.
+func (u *User) RemainingQuota() int {
+	remaining := u.APIQuotaLimit - u.APIQuotaUsed
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+// QuotaPercentUsed returns the percentage of quota consumed (0-100).
+func (u *User) QuotaPercentUsed() int {
+	if u.APIQuotaLimit == 0 {
+		return 100
+	}
+	return (u.APIQuotaUsed * 100) / u.APIQuotaLimit
+}
+
+// hashToken creates a SHA256 hash of a token.
+// Used for GitHub tokens and session tokens.
+func hashToken(token string) string {
+	hash := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(hash[:])
+}
+
+func isValidEmail(email string) bool {
+	// Basic validation: must contain @ and have parts before and after
+	if len(email) < 3 || len(email) > 255 {
+		return false
 	}
 
-	return used < limit, nil
+	atIndex := strings.LastIndex(email, "@")
+	if atIndex < 1 || atIndex >= len(email)-1 {
+		return false
+	}
+
+	// Check for dot in domain part
+	domain := email[atIndex+1:]
+	if !strings.Contains(domain, ".") {
+		return false
+	}
+
+	// No spaces allowed
+	if strings.Contains(email, " ") {
+		return false
+	}
+
+	return true
 }

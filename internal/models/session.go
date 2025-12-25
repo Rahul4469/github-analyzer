@@ -1,145 +1,297 @@
 package models
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const (
+	MinBytesPerToken = 32
+	TokenLength      = 32
+	SessionDuration  = 24 * time.Hour
 )
 
 type Session struct {
-	ID     int `json:"id"`
-	UserID int `json:"user_id"`
-	//Token is only set when creating a new session.when looking up a session
-	//this will be left empy, as we only store the hash of a session token
-	//in our database a we cannot reverse it into a raw token.
-	Token     string
-	TokenHash string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	TokenHash string    `json:"-"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
-const (
-	// MinBytesPerToken is the minimum number of bytes for a session token
-	MinBytesPerToken = 32
-	// DefaultTokenLength is the default token length (32 bytes = 256 bits)
-	DefaultTokenLength = 32
-	// SessionDuration is how long a session lasts (24 hours)
-	SessionDuration = 24 * time.Hour
-)
+// IsExpired returns true if the session has expired.
+func (s *Session) IsExpired() bool {
+	return time.Now().After(s.ExpiresAt)
+}
+
+// TimeUntilExpiry returns the duration until the session expires.
+// Returns 0 if already expired.
+func (s *Session) TimeUntilExpiry() time.Duration {
+	remaining := time.Until(s.ExpiresAt)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
 
 type SessionService struct {
-	DB *sql.DB
-
-	BytesPerToken   int
-	SessionDuration time.Duration // to set time duration to 24 hr
+	pool            *pgxpool.Pool
+	sessionDuration time.Duration
 }
 
-func NewSessionService(db *sql.DB) *SessionService {
+func NewSessionService(pool *pgxpool.Pool, sessionDuration time.Duration) *SessionService {
 	return &SessionService{
-		DB:              db,
-		BytesPerToken:   DefaultTokenLength,
-		SessionDuration: SessionDuration,
+		pool:            pool,
+		sessionDuration: sessionDuration,
 	}
 }
 
-// Create new session for user
-func (ss *SessionService) Create(userID int) (*Session, error) {
-	// check token length
-	bytesPerToken := ss.BytesPerToken
-	if bytesPerToken < MinBytesPerToken {
-		bytesPerToken = MinBytesPerToken
-	}
-	token, err := ss.generateToken(bytesPerToken)
+func (s *SessionService) Create(ctx context.Context, userID int64) (token string, session *Session, err error) {
+	// Generate cryptographically secure random bytes
+	tokenBytes := make([]byte, TokenLength)
+	_, err = rand.Read(tokenBytes)
 	if err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
+		return "", nil, fmt.Errorf("failed to generate session token: %w", err)
 	}
 
-	session := Session{
-		UserID:    userID,
-		Token:     token,
-		TokenHash: ss.hash(token),
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(ss.SessionDuration),
-	}
+	// Encode as base64 for cookie storage (URL-safe encoding)
+	token = base64.URLEncoding.EncodeToString(tokenBytes)
 
-	row := ss.DB.QueryRow(`
-	INSERT INTO sessions (user_id, token_hash, created_at, expires_at)
-	VALUES($1, $2, NOW(), NOW() + INTERVAL '24 hours')
-	ON CONFLICT (user_id)
-	DO UPDATE
-	SET token_hash = $2
-	RETURNING id, created_at, expires_at
-	`, session.UserID, session.TokenHash)
+	// Hash the token for database storage
+	tokenHash := hashSessionToken(token)
 
-	err = row.Scan(&session.ID, &session.CreatedAt, &session.ExpiresAt)
+	// Calculate expiration
+	expiresAt := time.Now().Add(s.sessionDuration)
+
+	// Insert session into database
+	query := `
+		INSERT INTO sessions (user_id, token_hash, expires_at)
+		VALUES ($1, $2, $3)
+		RETURNING id, user_id, token_hash, created_at, expires_at
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	session = &Session{}
+	err = s.pool.QueryRow(ctx, query, userID, tokenHash, expiresAt).Scan(
+		&session.ID,
+		&session.UserID,
+		&session.TokenHash,
+		&session.CreatedAt,
+		&session.ExpiresAt,
+	)
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to create session: %w", err)
+		return "", nil, fmt.Errorf("failed to create session: %w", err)
 	}
-	return &session, nil
+
+	return token, session, nil
 }
 
-// Validate token and return user
-func (ss *SessionService) User(token string) (*User, error) {
-	tokenHash := ss.hash(token)
-	var user User
-	row := ss.DB.QueryRow(`
-	SELECT users.id,
-		users.email,
-		users.password_hash
-	FROM sessions
-	JOIN users ON users.id = sessions.user_id
-	WHERE sessions.token_hash = $1 AND sessions.expires_at > NOW();`, tokenHash)
-	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash)
+// User retrieves the user associated with a session token.
+// 1. Hash the provided token
+// 2. Look up session by hash
+// 3. Check if expired
+// 4. Return associated user
+func (s *SessionService) User(ctx context.Context, token string) (*User, error) {
+	tokenHash := hashSessionToken(token)
+
+	// Join sessions with users to get user data in one query
+	query := `
+		SELECT 
+			u.id, u.email, u.password_hash, u.github_token_hash, 
+			u.api_quota_used, u.api_quota_limit, u.created_at, u.updated_at,
+			s.expires_at
+		FROM sessions s
+		JOIN users u ON s.user_id = u.id
+		WHERE s.token_hash = $1
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	user := &User{}
+	var expiresAt time.Time
+
+	err := s.pool.QueryRow(ctx, query, tokenHash).Scan(
+		&user.ID,
+		&user.Email,
+		&user.PasswordHash,
+		&user.GitHubTokenHash,
+		&user.APIQuotaUsed,
+		&user.APIQuotaLimit,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+		&expiresAt,
+	)
+
 	if err != nil {
-		return nil, fmt.Errorf("users: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrSessionNotFound
+		}
+		return nil, fmt.Errorf("failed to get user from session: %w", err)
 	}
 
-	return &user, nil
+	// Check if session has expired
+	if time.Now().After(expiresAt) {
+		// Optionally delete the expired session
+		go s.deleteByHash(context.Background(), tokenHash)
+		return nil, ErrSessionExpired
+	}
+
+	return user, nil
 }
 
-func (ss *SessionService) Delete(token string) error {
-	tokenHash := ss.hash(token)
-	result, err := ss.DB.Exec(`
-	DELETE FROM sessions
-	WHERE token_hash = $1`, tokenHash)
+// Delete removes a session by its raw token.
+// Called during logout.
+func (s *SessionService) Delete(ctx context.Context, token string) error {
+	tokenHash := hashSessionToken(token)
+	return s.deleteByHash(ctx, tokenHash)
+}
+
+// deleteByHash removes a session by its hash.
+// Internal method used by Delete and cleanup routines.
+func (s *SessionService) deleteByHash(ctx context.Context, tokenHash string) error {
+	query := `DELETE FROM sessions WHERE token_hash = $1`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	_, err := s.pool.Exec(ctx, query, tokenHash)
 	if err != nil {
 		return fmt.Errorf("failed to delete session: %w", err)
 	}
 
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to check rows affected: %w", err)
-	}
-	if rows == 0 {
-		return fmt.Errorf("session not found")
-	}
 	return nil
 }
 
-func (ss *SessionService) generateToken(length int) (string, error) {
-	// Create byte slice
-	b := make([]byte, length)
+// DeleteAllForUser removes all sessions for a specific user.
+// Use this for "logout from all devices" functionality or account deletion.
+func (s *SessionService) DeleteAllForUser(ctx context.Context, userID int64) error {
+	query := `DELETE FROM sessions WHERE user_id = $1`
 
-	// Fill with random bytes
-	_, err := rand.Read(b)
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	_, err := s.pool.Exec(ctx, query, userID)
 	if err != nil {
-		return "", fmt.Errorf("failed to read random: %w", err)
+		return fmt.Errorf("failed to delete user sessions: %w", err)
 	}
 
-	// Encode to base64 for URL-safe string
-	token := base64.URLEncoding.EncodeToString(b)
-	return token, nil
+	return nil
 }
 
-// Store hash in database
-func (ss *SessionService) hash(token string) string {
-	// Create SHA256 hash
-	hash := sha256.Sum256([]byte(token))
+// DeleteExpired removes all expired sessions from the database.
+// Should be called periodically (e.g., via cron job or background goroutine).
+//
+// Returns the number of sessions deleted.
+func (s *SessionService) DeleteExpired(ctx context.Context) (int64, error) {
+	query := `DELETE FROM sessions WHERE expires_at < NOW()`
 
-	// Encode to base64
-	tokenHash := base64.URLEncoding.EncodeToString(hash[:])
-	return tokenHash
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	result, err := s.pool.Exec(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete expired sessions: %w", err)
+	}
+
+	return result.RowsAffected(), nil
+}
+
+// CountActiveSessions returns the number of active sessions for a user.
+// Useful for security monitoring or limiting concurrent sessions.
+func (s *SessionService) CountActiveSessions(ctx context.Context, userID int64) (int, error) {
+	query := `
+		SELECT COUNT(*) 
+		FROM sessions 
+		WHERE user_id = $1 AND expires_at > NOW()
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	var count int
+	err := s.pool.QueryRow(ctx, query, userID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count sessions: %w", err)
+	}
+
+	return count, nil
+}
+
+// Extend updates the expiration time of a session.
+// Use this for "remember me" functionality or session refresh.
+func (s *SessionService) Extend(ctx context.Context, token string, duration time.Duration) error {
+	tokenHash := hashSessionToken(token)
+	newExpiry := time.Now().Add(duration)
+
+	query := `
+		UPDATE sessions 
+		SET expires_at = $1 
+		WHERE token_hash = $2 AND expires_at > NOW()
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	result, err := s.pool.Exec(ctx, query, newExpiry, tokenHash)
+	if err != nil {
+		return fmt.Errorf("failed to extend session: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return ErrSessionNotFound
+	}
+
+	return nil
+}
+
+// HELPER FUNCTIONS -------------------------------------
+
+func hashSessionToken(token string) string {
+	hash := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(hash[:])
+}
+
+// StartCleanupRoutine starts a background goroutine that periodically
+// cleans up expired sessions. Returns a channel that can be closed to stop cleanup.
+func (s *SessionService) StartCleanupRoutine(interval time.Duration) chan struct{} {
+	stop := make(chan struct{})
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				count, err := s.DeleteExpired(ctx)
+				cancel()
+
+				if err != nil {
+					// Log error but continue
+					fmt.Printf("Session cleanup error: %v\n", err)
+				} else if count > 0 {
+					fmt.Printf("Cleaned up %d expired sessions\n", count)
+				}
+
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	return stop
 }

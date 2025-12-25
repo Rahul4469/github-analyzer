@@ -1,16 +1,14 @@
 -- +goose Up
 -- +goose StatementBegin
 CREATE TABLE users (
-    id SERIAL PRIMARY KEY,
-    username VARCHAR(255) UNIQUE NOT NULL,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255),
-    github_token VARCHAR(255) NOT NULL,
-    api_quota_used INTEGER DEFAULT 0,
-    api_quota_limit INTEGER DEFAULT 1000,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_login TIMESTAMP
+    id              BIGSERIAL PRIMARY KEY,
+    email           VARCHAR(255) UNIQUE NOT NULL,
+    password_hash   VARCHAR(255) NOT NULL,
+    github_token_hash VARCHAR(64),  -- SHA256 = 64 hex chars
+    api_quota_used  INTEGER DEFAULT 0,
+    api_quota_limit INTEGER DEFAULT 100000,  -- Token limit
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Index for fast email lookups (authentication)

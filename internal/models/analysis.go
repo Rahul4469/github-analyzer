@@ -2,93 +2,126 @@ package models
 
 import (
 	"context"
-	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Analysis represents code analysis results
-type Analysis struct {
-	ID                   int             `json:"id"`
-	RepositoryID         int64           `json:"repository_id"`
-	CodeQualityScore     int             `json:"code_quality_score"`
-	SecurityScore        int             `json:"security_score"`
-	ComplexityScore      int             `json:"complexity_score"`
-	MaintainabilityScore int             `json:"maintainability_score"`
-	PerformanceScore     int             `json:"performance_score"`
-	TotalIssues          int             `json:"total_issues"`
-	CriticalIssues       int             `json:"critical_issues"`
-	HighIssues           int             `json:"high_issues"`
-	MediumIssues         int             `json:"medium_issues"`
-	LowIssues            int             `json:"low_issues"`
-	Summary              string          `json:"summary"`
-	RawAnalysis          string          `json:"raw_analysis"`
-	Issues               []CodeIssue     `json:"issues,omitempty"`
-	CodeStructures       []CodeStructure `json:"code_structures,omitempty"`
-	AnalyzedAt           time.Time       `json:"analyzed_at"`
-	CreatedAt            time.Time       `json:"created_at"`
-	UpdatedAt            time.Time       `json:"updated_at"`
+type AnalysisStatus string
+
+const (
+	StatusPending    AnalysisStatus = "pending"
+	StatusProcessing AnalysisStatus = "processing"
+	StatusCompleted  AnalysisStatus = "completed"
+	StatusFailed     AnalysisStatus = "failed"
+)
+
+// FileContent represents a fetched code file from GitHub.
+type FileContent struct {
+	Path     string `json:"path"`
+	Content  string `json:"content"`
+	Language string `json:"language"`
+	Size     int    `json:"size"`
 }
 
-// CodeIssue represents a code issue found during analysis
-type CodeIssue struct {
-	ID           int        `json:"id"`
-	AnalysisID   int        `json:"analysis_id"`
-	Title        string     `json:"title"`
-	Description  string     `json:"description"`
-	IssueType    string     `json:"issue_type"`
-	Severity     string     `json:"severity"`
-	AffectedFile string     `json:"affected_file"`
-	LineNumber   int        `json:"line_number"`
-	SuggestedFix string     `json:"suggested_fix"`
-	CodeSnippet  string     `json:"code_snippet"`
-	IsResolved   bool       `json:"is_resolved"`
-	ResolvedAt   *time.Time `json:"resolved_at,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-}
-
-// CodeStructure represents file structure analysis
+// CodeStructure represents the file tree of a repository.
 type CodeStructure struct {
-	ID            int       `json:"id"`
-	RepositoryID  int64     `json:"repository_id"`
-	FilePath      string    `json:"file_path"`
-	FileType      string    `json:"file_type"`
-	LinesOfCode   int       `json:"lines_of_code"`
-	Complexity    int       `json:"complexity"`
-	FunctionCount int       `json:"function_count"`
-	ClassCount    int       `json:"class_count"`
-	Description   string    `json:"description"`
-	CreatedAt     time.Time `json:"created_at"`
+	TotalFiles        int            `json:"total_files"`
+	TotalSize         int            `json:"total_size"`
+	Directories       []string       `json:"directories"`
+	Files             []string       `json:"files"`
+	LanguageBreakdown map[string]int `json:"language_breakdown"`
 }
 
-// AnalysisService handles analysis-related database operations, its the basic repo details analytical data
+// Issue represents a code issue found during analysis.
+type Issue struct {
+	Severity    string `json:"severity"` // HIGH, MEDIUM, LOW
+	Category    string `json:"category"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	File        string `json:"file,omitempty"`
+	Line        int    `json:"line,omitempty"`
+	Suggestion  string `json:"suggestion,omitempty"`
+}
+
+// AnalysisSummary provides a quick overview of analysis results.
+type AnalysisSummary struct {
+	TotalIssues      int            `json:"total_issues"`
+	IssuesBySeverity map[string]int `json:"issues_by_severity"`
+	IssuesByCategory map[string]int `json:"issues_by_category"`
+	OverallScore     int            `json:"overall_score"`
+	KeyFindings      []string       `json:"key_findings"`
+}
+
+type Analysis struct {
+	ID           int64          `json:"id"`
+	UserID       int64          `json:"user_id"`
+	RepositoryID int64          `json:"repository_id"`
+	Status       AnalysisStatus `json:"status"`
+
+	// Data fetched from GitHub, jsonb
+	CodeStructure *CodeStructure `json:"code_structure,omitempty"`
+	CodeFiles     []FileContent  `json:"code_files,omitempty"`
+	READMEContent *string        `json:"readme_content,omitempty"`
+
+	// AI analysis results
+	AIAnalysis *string          `json:"ai_analysis,omitempty"`
+	Summary    *AnalysisSummary `json:"summary,omitempty"`
+	Issues     []Issue          `json:"issues,omitempty"`
+
+	// Usage tracking
+	TokensUsed   int     `json:"tokens_used"`
+	ErrorMessage *string `json:"error_message,omitempty"`
+
+	CreatedAt   time.Time  `json:"created_at"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+
+	// Joined data
+	Repository *Repository `json:"repository,omitempty"`
+}
+
 type AnalysisService struct {
-	DB *sql.DB
+	pool *pgxpool.Pool
 }
 
-func NewAnalysisService(db *sql.DB) *AnalysisService {
-	return &AnalysisService{DB: db}
+func NewAnalysisService(pool *pgxpool.Pool) *AnalysisService {
+	return &AnalysisService{pool: pool}
 }
 
-// Create creates a new analysis into the db
-func (as *AnalysisService) Create(ctx context.Context, analysis *Analysis) (*Analysis, error) {
-	if analysis.RepositoryID == 0 {
-		return nil, fmt.Errorf("repository_id is required")
-	}
+// to create/start new analysis for a repository
+func (s *AnalysisService) Create(ctx context.Context, userID, repositoryID int64) (*Analysis, error) {
+	query := `
+		INSERT INTO analyses (user_id, repository_id, status)
+		VALUES ($1, $2, $3)
+		RETURNING id, user_id, repository_id, status, code_structure, readme_content, 
+		          ai_analysis, tokens_used, error_message, created_at, started_at, completed_at
+	`
 
-	err := as.DB.QueryRowContext(
-		ctx,
-		`INSERT INTO analyses (repository_id, code_quality_score, security_score,
-		                      complexity_score, maintainability_score, performance_score,
-		                      total_issues, critical_issues, high_issues, medium_issues, low_issues,
-		                      summary, raw_analysis, analyzed_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
-		 RETURNING id, created_at, updated_at, analyzed_at`,
-		analysis.RepositoryID, analysis.CodeQualityScore, analysis.SecurityScore,
-		analysis.ComplexityScore, analysis.MaintainabilityScore, analysis.PerformanceScore,
-		analysis.TotalIssues, analysis.CriticalIssues, analysis.HighIssues,
-		analysis.MediumIssues, analysis.LowIssues, analysis.Summary, analysis.RawAnalysis,
-	).Scan(&analysis.ID, &analysis.CreatedAt, &analysis.UpdatedAt, &analysis.AnalyzedAt)
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	analysis := &Analysis{}
+	var codeStructureJSON []byte
+
+	err := s.pool.QueryRow(ctx, query, userID, repositoryID, StatusPending).Scan(
+		&analysis.ID,
+		&analysis.UserID,
+		&analysis.RepositoryID,
+		&analysis.Status,
+		&codeStructureJSON,
+		&analysis.READMEContent,
+		&analysis.AIAnalysis,
+		&analysis.TokensUsed,
+		&analysis.ErrorMessage,
+		&analysis.CreatedAt,
+		&analysis.StartedAt,
+		&analysis.CompletedAt,
+	)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create analysis: %w", err)
@@ -97,120 +130,398 @@ func (as *AnalysisService) Create(ctx context.Context, analysis *Analysis) (*Ana
 	return analysis, nil
 }
 
-// GetByID retrieves an analysis by ID
-func (as *AnalysisService) GetByID(ctx context.Context, id int) (*Analysis, error) {
-	var analysis Analysis
+// MarkProcessing updates the analysis status to processing.
+func (s *AnalysisService) MarkProcessing(ctx context.Context, analysisID int64) error {
+	query := `
+		UPDATE analyses 
+		SET status = $1, started_at = NOW()
+		WHERE id = $2
+	`
 
-	err := as.DB.QueryRowContext(
-		ctx,
-		`SELECT id, repository_id, code_quality_score, security_score,
-		        complexity_score, maintainability_score, performance_score,
-		        total_issues, critical_issues, high_issues, medium_issues, low_issues,
-		        summary, raw_analysis, analyzed_at, created_at, updated_at
-		 FROM analyses WHERE id = $1`,
-		id,
-	).Scan(
-		&analysis.ID, &analysis.RepositoryID, &analysis.CodeQualityScore,
-		&analysis.SecurityScore, &analysis.ComplexityScore,
-		&analysis.MaintainabilityScore, &analysis.PerformanceScore,
-		&analysis.TotalIssues, &analysis.CriticalIssues, &analysis.HighIssues,
-		&analysis.MediumIssues, &analysis.LowIssues, &analysis.Summary,
-		&analysis.RawAnalysis, &analysis.AnalyzedAt, &analysis.CreatedAt,
-		&analysis.UpdatedAt,
-	)
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
 
+	_, err := s.pool.Exec(ctx, query, StatusProcessing, analysisID)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("analysis not found")
-		}
-		return nil, fmt.Errorf("failed to fetch analysis: %w", err)
+		return fmt.Errorf("failed to mark analysis as processing: %w", err)
 	}
 
-	return &analysis, nil
+	return nil
 }
 
-// GetByRepositoryID retrieves the latest analysis for a repository
-func (as *AnalysisService) GetByRepositoryID(ctx context.Context, repositoryID int64) (*Analysis, error) {
-	var analysis Analysis
-
-	err := as.DB.QueryRowContext(
-		ctx,
-		`SELECT id, repository_id, code_quality_score, security_score,
-		        complexity_score, maintainability_score, performance_score,
-		        total_issues, critical_issues, high_issues, medium_issues, low_issues,
-		        summary, raw_analysis, analyzed_at, created_at, updated_at
-		 FROM analyses WHERE repository_id = $1 ORDER BY analyzed_at DESC LIMIT 1`,
-		repositoryID,
-	).Scan(
-		&analysis.ID, &analysis.RepositoryID, &analysis.CodeQualityScore,
-		&analysis.SecurityScore, &analysis.ComplexityScore,
-		&analysis.MaintainabilityScore, &analysis.PerformanceScore,
-		&analysis.TotalIssues, &analysis.CriticalIssues, &analysis.HighIssues,
-		&analysis.MediumIssues, &analysis.LowIssues, &analysis.Summary,
-		&analysis.RawAnalysis, &analysis.AnalyzedAt, &analysis.CreatedAt,
-		&analysis.UpdatedAt,
-	)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("no analysis found for this repository")
-		}
-		return nil, fmt.Errorf("failed to fetch analysis: %w", err)
+// UpdateGitHubData stores the fetched GitHub data.
+func (s *AnalysisService) UpdateGitHubData(ctx context.Context, analysisID int64, codeStructure *CodeStructure, codeFiles []FileContent, readme string) error {
+	// Combine code structure and files into a single JSONB structure
+	combinedData := struct {
+		Structure *CodeStructure `json:"structure"`
+		Files     []FileContent  `json:"files"`
+	}{
+		Structure: codeStructure,
+		Files:     codeFiles,
 	}
 
-	return &analysis, nil
+	combinedJSON, err := json.Marshal(combinedData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal combined data: %w", err)
+	}
+
+	query := `
+        UPDATE analyses 
+        SET code_structure = $1, readme_content = $2
+        WHERE id = $3
+    `
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	_, err = s.pool.Exec(ctx, query, combinedJSON, readme, analysisID)
+	if err != nil {
+		return fmt.Errorf("failed to update GitHub data: %w", err)
+	}
+
+	return nil
 }
 
-// GetHistoryByRepositoryID retrieves analysis history for a repository
-func (as *AnalysisService) GetHistoryByRepositoryID(ctx context.Context, repositoryID int64, limit int) ([]Analysis, error) {
-	rows, err := as.DB.QueryContext(
-		ctx,
-		`SELECT id, repository_id, code_quality_score, security_score,
-		        complexity_score, maintainability_score, performance_score,
-		        total_issues, critical_issues, high_issues, medium_issues, low_issues,
-		        summary, raw_analysis, analyzed_at, created_at, updated_at
-		 FROM analyses WHERE repository_id = $1
-		 ORDER BY analyzed_at DESC LIMIT $2`,
-		repositoryID, limit,
+// Complete marks the analysis as completed with results.
+func (s *AnalysisService) Complete(ctx context.Context, analysisID int64, aiAnalysis string, summary *AnalysisSummary, issues []Issue, tokensUsed int) error {
+	summaryJSON, err := json.Marshal(summary)
+	if err != nil {
+		return fmt.Errorf("failed to marshal summary: %w", err)
+	}
+
+	// Store issues within the AI analysis or as a separate field
+	fullResult := struct {
+		RawAnalysis string           `json:"raw_analysis"`
+		Summary     *AnalysisSummary `json:"summary"`
+		Issues      []Issue          `json:"issues"`
+	}{
+		RawAnalysis: aiAnalysis,
+		Summary:     summary,
+		Issues:      issues,
+	}
+
+	fullResultJSON, err := json.Marshal(fullResult)
+	if err != nil {
+		return fmt.Errorf("failed to marshal full result: %w", err)
+	}
+
+	query := `
+		UPDATE analyses 
+		SET status = $1, ai_analysis = $2, tokens_used = $3, completed_at = NOW()
+		WHERE id = $4
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	_, err = s.pool.Exec(ctx, query, StatusCompleted, string(fullResultJSON), tokensUsed, analysisID)
+	if err != nil {
+		return fmt.Errorf("failed to complete analysis: %w", err)
+	}
+
+	_ = summaryJSON // We stored it in fullResultJSON instead
+
+	return nil
+}
+
+// Fail marks the analysis as failed with an error message.
+func (s *AnalysisService) Fail(ctx context.Context, analysisID int64, errorMsg string) error {
+	query := `
+		UPDATE analyses 
+		SET status = $1, error_message = $2, completed_at = NOW()
+		WHERE id = $3
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	_, err := s.pool.Exec(ctx, query, StatusFailed, errorMsg, analysisID)
+	if err != nil {
+		return fmt.Errorf("failed to mark analysis as failed: %w", err)
+	}
+
+	return nil
+}
+
+// ByID retrieves an analysis by its ID.
+func (s *AnalysisService) ByID(ctx context.Context, id int64) (*Analysis, error) {
+	query := `
+		SELECT a.id, a.user_id, a.repository_id, a.status, a.code_structure, a.readme_content,
+		       a.ai_analysis, a.tokens_used, a.error_message, a.created_at, a.started_at, a.completed_at,
+		       r.id, r.github_url, r.owner, r.name, r.description, r.primary_language, r.stars_count, r.forks_count
+		FROM analyses a
+		JOIN repositories r ON a.repository_id = r.id
+		WHERE a.id = $1
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	analysis := &Analysis{Repository: &Repository{}}
+	var codeStructureJSON []byte
+	var aiAnalysisJSON *string
+
+	err := s.pool.QueryRow(ctx, query, id).Scan(
+		&analysis.ID,
+		&analysis.UserID,
+		&analysis.RepositoryID,
+		&analysis.Status,
+		&codeStructureJSON,
+		&analysis.READMEContent,
+		&aiAnalysisJSON,
+		&analysis.TokensUsed,
+		&analysis.ErrorMessage,
+		&analysis.CreatedAt,
+		&analysis.StartedAt,
+		&analysis.CompletedAt,
+		&analysis.Repository.ID,
+		&analysis.Repository.GitHubURL,
+		&analysis.Repository.Owner,
+		&analysis.Repository.Name,
+		&analysis.Repository.Description,
+		&analysis.Repository.PrimaryLanguage,
+		&analysis.Repository.StarsCount,
+		&analysis.Repository.ForksCount,
 	)
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch analysis history: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrAnalysisNotFound
+		}
+		return nil, fmt.Errorf("failed to get analysis: %w", err)
+	}
+
+	// Parse JSON fields
+	if len(codeStructureJSON) > 0 {
+		var combined struct {
+			Structure *CodeStructure `json:"structure"`
+			Files     []FileContent  `json:"files"`
+		}
+		if err := json.Unmarshal(codeStructureJSON, &combined); err == nil {
+			analysis.CodeStructure = combined.Structure
+			analysis.CodeFiles = combined.Files
+		}
+	}
+
+	if aiAnalysisJSON != nil && *aiAnalysisJSON != "" {
+		var fullResult struct {
+			RawAnalysis string           `json:"raw_analysis"`
+			Summary     *AnalysisSummary `json:"summary"`
+			Issues      []Issue          `json:"issues"`
+		}
+		if err := json.Unmarshal([]byte(*aiAnalysisJSON), &fullResult); err == nil {
+			analysis.AIAnalysis = &fullResult.RawAnalysis
+			analysis.Summary = fullResult.Summary
+			analysis.Issues = fullResult.Issues
+		} else {
+			// Fallback: treat as raw text
+			analysis.AIAnalysis = aiAnalysisJSON
+		}
+	}
+
+	return analysis, nil
+}
+
+// ByUserID retrieves all analyses for a user, ordered by most recent.
+func (s *AnalysisService) ByUserID(ctx context.Context, userID int64, limit int) ([]*Analysis, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	query := `
+		SELECT a.id, a.user_id, a.repository_id, a.status, a.tokens_used, a.error_message, 
+		       a.created_at, a.started_at, a.completed_at,
+		       r.id, r.github_url, r.owner, r.name, r.description, r.primary_language, r.stars_count
+		FROM analyses a
+		JOIN repositories r ON a.repository_id = r.id
+		WHERE a.user_id = $1
+		ORDER BY a.created_at DESC
+		LIMIT $2
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	rows, err := s.pool.Query(ctx, query, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list analyses: %w", err)
 	}
 	defer rows.Close()
 
-	var analyses []Analysis
-
+	var analyses []*Analysis
 	for rows.Next() {
-		var analysis Analysis
-
+		analysis := &Analysis{Repository: &Repository{}}
 		err := rows.Scan(
-			&analysis.ID, &analysis.RepositoryID, &analysis.CodeQualityScore,
-			&analysis.SecurityScore, &analysis.ComplexityScore,
-			&analysis.MaintainabilityScore, &analysis.PerformanceScore,
-			&analysis.TotalIssues, &analysis.CriticalIssues, &analysis.HighIssues,
-			&analysis.MediumIssues, &analysis.LowIssues, &analysis.Summary,
-			&analysis.RawAnalysis, &analysis.AnalyzedAt, &analysis.CreatedAt,
-			&analysis.UpdatedAt,
+			&analysis.ID,
+			&analysis.UserID,
+			&analysis.RepositoryID,
+			&analysis.Status,
+			&analysis.TokensUsed,
+			&analysis.ErrorMessage,
+			&analysis.CreatedAt,
+			&analysis.StartedAt,
+			&analysis.CompletedAt,
+			&analysis.Repository.ID,
+			&analysis.Repository.GitHubURL,
+			&analysis.Repository.Owner,
+			&analysis.Repository.Name,
+			&analysis.Repository.Description,
+			&analysis.Repository.PrimaryLanguage,
+			&analysis.Repository.StarsCount,
 		)
-
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan analysis: %w", err)
 		}
-
 		analyses = append(analyses, analysis)
 	}
 
-	return analyses, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating analyses: %w", err)
+	}
+
+	return analyses, nil
 }
 
-// Delete deletes an analysis
-func (as *AnalysisService) Delete(ctx context.Context, id int) error {
-	_, err := as.DB.ExecContext(
-		ctx,
-		`DELETE FROM analyses WHERE id = $1`,
-		id,
-	)
+// CountByUser returns the number of analyses for a user.
+func (s *AnalysisService) CountByUser(ctx context.Context, userID int64) (int, error) {
+	query := `SELECT COUNT(*) FROM analyses WHERE user_id = $1`
 
-	return err
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	var count int
+	err := s.pool.QueryRow(ctx, query, userID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count analyses: %w", err)
+	}
+
+	return count, nil
+}
+
+// CountByStatus returns counts of analyses grouped by status for a user.
+func (s *AnalysisService) CountByStatus(ctx context.Context, userID int64) (map[AnalysisStatus]int, error) {
+	query := `
+		SELECT status, COUNT(*) 
+		FROM analyses 
+		WHERE user_id = $1 
+		GROUP BY status
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	rows, err := s.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count analyses by status: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[AnalysisStatus]int)
+	for rows.Next() {
+		var status AnalysisStatus
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan status count: %w", err)
+		}
+		counts[status] = count
+	}
+
+	return counts, nil
+}
+
+// Delete removes an analysis.
+func (s *AnalysisService) Delete(ctx context.Context, id int64) error {
+	query := `DELETE FROM analyses WHERE id = $1`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	result, err := s.pool.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete analysis: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return ErrAnalysisNotFound
+	}
+
+	return nil
+}
+
+// GetPendingAnalyses retrieves analyses that are waiting to be processed.
+// Useful for background job processing.
+func (s *AnalysisService) GetPendingAnalyses(ctx context.Context, limit int) ([]*Analysis, error) {
+	query := `
+		SELECT id, user_id, repository_id, status, created_at
+		FROM analyses
+		WHERE status = $1
+		ORDER BY created_at ASC
+		LIMIT $2
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	rows, err := s.pool.Query(ctx, query, StatusPending, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pending analyses: %w", err)
+	}
+	defer rows.Close()
+
+	var analyses []*Analysis
+	for rows.Next() {
+		analysis := &Analysis{}
+		err := rows.Scan(
+			&analysis.ID,
+			&analysis.UserID,
+			&analysis.RepositoryID,
+			&analysis.Status,
+			&analysis.CreatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan analysis: %w", err)
+		}
+		analyses = append(analyses, analysis)
+	}
+
+	return analyses, nil
+}
+
+// HELPER FUNCS --------------------------------
+
+// Duration returns how long the analysis took.
+// Returns 0 if not completed.
+func (a *Analysis) Duration() time.Duration {
+	if a.StartedAt == nil || a.CompletedAt == nil {
+		return 0
+	}
+	return a.CompletedAt.Sub(*a.StartedAt)
+}
+
+// IsPending returns true if the analysis is waiting to start.
+func (a *Analysis) IsPending() bool {
+	return a.Status == StatusPending
+}
+
+// IsProcessing returns true if the analysis is in progress.
+func (a *Analysis) IsProcessing() bool {
+	return a.Status == StatusProcessing
+}
+
+// IsCompleted returns true if the analysis finished successfully.
+func (a *Analysis) IsCompleted() bool {
+	return a.Status == StatusCompleted
+}
+
+// IsFailed returns true if the analysis encountered an error.
+func (a *Analysis) IsFailed() bool {
+	return a.Status == StatusFailed
+}
+
+// HighSeverityCount returns the number of high severity issues.
+func (a *Analysis) HighSeverityCount() int {
+	if a.Summary == nil {
+		return 0
+	}
+	return a.Summary.IssuesBySeverity["HIGH"]
 }

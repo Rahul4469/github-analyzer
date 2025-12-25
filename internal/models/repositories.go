@@ -2,229 +2,298 @@ package models
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Repository represents a GitHub repository
+// both HTTPS and shorthand formats supported:
+// - https://github.com/owner/repo
+// - https://github.com/owner/repo.git
+// - github.com/owner/repo
+// MustCompile for fail fast impl
+var GitHubURLPattern = regexp.MustCompile(`^(?:https?://)?github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+?)(?:\.git)?/?$`)
+
 type Repository struct {
-	ID              int64         `json:"id"`
-	UserID          int           `json:"user_id"`
-	FullName        string        `json:"full_name"` // owner/repo
-	Owner           string        `json:"owner"`
-	Name            string        `json:"name"`
-	URL             string        `json:"url"`
-	Description     string        `json:"description"`
-	StarsCount      int           `json:"stars_count"`
-	ForksCount      int           `json:"forks_count"`
-	WatchersCount   int           `json:"watchers_count"`
-	OpenIssuesCount int           `json:"open_issues_count"`
-	PrimaryLanguage string        `json:"primary_language"`
-	Languages       []Language    `json:"languages,omitempty"`
-	Contributors    []Contributor `json:"contributors,omitempty"`
-	Commits         []Commit      `json:"commits,omitempty"`
-	CreatedAt       time.Time     `json:"created_at"`
-	UpdatedAt       time.Time     `json:"updated_at"`
-}
-
-// Language represents programming language breakdown
-type Language struct {
-	ID           int       `json:"id"`
-	RepositoryID int64     `json:"repository_id"`
-	Language     string    `json:"language"`
-	Percentage   float64   `json:"percentage"`
-	BytesOfCode  int64     `json:"bytes_of_code"`
-	CreatedAt    time.Time `json:"created_at"`
-}
-
-// Contributor represents a repository contributor
-type Contributor struct {
-	ID           int       `json:"id"`
-	RepositoryID int64     `json:"repository_id"`
-	Name         string    `json:"name"`
-	Email        string    `json:"email,omitempty"`
-	AvatarURL    string    `json:"avatar_url,omitempty"`
-	ProfileURL   string    `json:"profile_url,omitempty"`
-	Commits      int       `json:"commits"`
-	CreatedAt    time.Time `json:"created_at"`
-}
-
-// Commit represents a GitHub commit
-type Commit struct {
-	ID            int       `json:"id"`
-	RepositoryID  int64     `json:"repository_id"`
-	CommitHash    string    `json:"commit_hash"`
-	CommitMessage string    `json:"commit_message"`
-	AuthorName    string    `json:"author_name"`
-	AuthorEmail   string    `json:"author_email"`
-	Additions     int       `json:"additions"`
-	Deletions     int       `json:"deletions"`
-	ChangedFiles  int       `json:"changed_files"`
-	CommitDate    time.Time `json:"commit_date"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID              int64     `json:"id"`
+	UserID          int64     `json:"user_id"`
+	GitHubURL       string    `json:"github_url"`
+	Owner           string    `json:"owner"`
+	Name            string    `json:"name"`
+	Description     *string   `json:"description,omitempty"`
+	PrimaryLanguage *string   `json:"primary_language,omitempty"`
+	StarsCount      int       `json:"stars_count"`
+	ForksCount      int       `json:"forks_count"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type RepositoryService struct {
-	DB *sql.DB
+	pool *pgxpool.Pool
 }
 
-func NewRepositoryService(db *sql.DB) *RepositoryService {
-	return &RepositoryService{DB: db}
+// constructor ~
+func NewRepositoryService(pool *pgxpool.Pool) *RepositoryService {
+	return &RepositoryService{pool: pool}
 }
 
-// Create creates a new repository
-func (rs *RepositoryService) Create(ctx context.Context, repo *Repository) (*Repository, error) {
-	if repo.UserID == 0 || repo.FullName == "" {
-		return nil, fmt.Errorf("user_id and full_name are required")
+// ParseGitHubURL extracts owner and repo name from a GitHub URL.
+func ParseGitHubURL(url string) (owner, repo string, err error) {
+	url = strings.TrimSpace(url)
+
+	matches := GitHubURLPattern.FindStringSubmatch(url)
+	if matches == nil || len(matches) != 3 {
+		return "", "", ErrInvalidRepositoryURL
 	}
 
-	err := rs.DB.QueryRowContext(
-		ctx,
-		`INSERT INTO repositories (user_id, full_name, owner, name, url, description,
-		                           stars_count, forks_count, watchers_count,
-		                           open_issues_count, primary_language)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		 RETURNING id, created_at, updated_at`,
-		repo.UserID, repo.FullName, repo.Owner, repo.Name, repo.URL,
-		repo.Description, repo.StarsCount, repo.ForksCount, repo.WatchersCount,
-		repo.OpenIssuesCount, repo.PrimaryLanguage,
-	).Scan(&repo.ID, &repo.CreatedAt, &repo.UpdatedAt)
+	return matches[1], matches[2], nil
+}
+
+// save repo data to db
+func (s *RepositoryService) Create(ctx context.Context, repo *Repository) (*Repository, error) {
+	// Validate URL format
+	owner, name, err := ParseGitHubURL(repo.GitHubURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Normalize the URL
+	repo.Owner = owner
+	repo.Name = name
+	repo.GitHubURL = fmt.Sprintf("https://github.com/%s/%s", owner, name)
+
+	query := `
+		INSERT INTO repositories (user_id, github_url, owner, name, description, primary_language, stars_count, forks_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (user_id, github_url) DO UPDATE SET
+			description = EXCLUDED.description,
+			primary_language = EXCLUDED.primary_language,
+			stars_count = EXCLUDED.stars_count,
+			forks_count = EXCLUDED.forks_count,
+			updated_at = NOW()
+		RETURNING id, user_id, github_url, owner, name, description, primary_language, stars_count, forks_count, created_at, updated_at
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	result := &Repository{}
+	err = s.pool.QueryRow(ctx, query,
+		repo.UserID,
+		repo.GitHubURL,
+		repo.Owner,
+		repo.Name,
+		repo.Description,
+		repo.PrimaryLanguage,
+		repo.StarsCount,
+		repo.ForksCount,
+	).Scan(
+		&result.ID,
+		&result.UserID,
+		&result.GitHubURL,
+		&result.Owner,
+		&result.Name,
+		&result.Description,
+		&result.PrimaryLanguage,
+		&result.StarsCount,
+		&result.ForksCount,
+		&result.CreatedAt,
+		&result.UpdatedAt,
+	)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create repository: %w", err)
 	}
 
+	return result, nil
+}
+
+// ByID retrieves a repository by its ID.
+func (s *RepositoryService) ByID(ctx context.Context, id int64) (*Repository, error) {
+	query := `
+		SELECT id, user_id, github_url, owner, name, description, primary_language, stars_count, forks_count, created_at, updated_at
+		FROM repositories
+		WHERE id = $1
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	repo := &Repository{}
+	err := s.pool.QueryRow(ctx, query, id).Scan(
+		&repo.ID,
+		&repo.UserID,
+		&repo.GitHubURL,
+		&repo.Owner,
+		&repo.Name,
+		&repo.Description,
+		&repo.PrimaryLanguage,
+		&repo.StarsCount,
+		&repo.ForksCount,
+		&repo.CreatedAt,
+		&repo.UpdatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRepositoryNotFound
+		}
+		return nil, fmt.Errorf("failed to get repository: %w", err)
+	}
+
 	return repo, nil
 }
 
-// GetByID retrieves a repository by ID
-func (rs *RepositoryService) GetByID(ctx context.Context, id int64) (*Repository, error) {
-	var repo Repository
+// ByUserID retrieves all repositories for a user, ordered by most recent.
+func (s *RepositoryService) ByUserID(ctx context.Context, userID int64) ([]*Repository, error) {
+	query := `
+		SELECT id, user_id, github_url, owner, name, description, primary_language, stars_count, forks_count, created_at, updated_at
+		FROM repositories
+		WHERE user_id = $1
+		ORDER BY updated_at DESC
+	`
 
-	err := rs.DB.QueryRowContext(
-		ctx,
-		`SELECT id, user_id, full_name, owner, name, url, description,
-		        stars_count, forks_count, watchers_count, open_issues_count,
-		        primary_language, created_at, updated_at
-		 FROM repositories WHERE id = $1`,
-		id,
-	).Scan(
-		&repo.ID, &repo.UserID, &repo.FullName, &repo.Owner, &repo.Name,
-		&repo.URL, &repo.Description, &repo.StarsCount, &repo.ForksCount,
-		&repo.WatchersCount, &repo.OpenIssuesCount, &repo.PrimaryLanguage,
-		&repo.CreatedAt, &repo.UpdatedAt,
-	)
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
 
+	rows, err := s.pool.Query(ctx, query, userID)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("repository not found")
-		}
-		return nil, fmt.Errorf("failed to fetch repository: %w", err)
-	}
-
-	return &repo, nil
-}
-
-// GetByFullName retrieves a repository by full name for a user
-func (rs *RepositoryService) GetByFullName(ctx context.Context, userID int, fullName string) (*Repository, error) {
-	var repo Repository
-
-	err := rs.DB.QueryRowContext(
-		ctx,
-		`SELECT id, user_id, full_name, owner, name, url, description,
-		        stars_count, forks_count, watchers_count, open_issues_count,
-		        primary_language, created_at, updated_at
-		 FROM repositories WHERE user_id = $1 AND full_name = $2`,
-		userID, fullName,
-	).Scan(
-		&repo.ID, &repo.UserID, &repo.FullName, &repo.Owner, &repo.Name,
-		&repo.URL, &repo.Description, &repo.StarsCount, &repo.ForksCount,
-		&repo.WatchersCount, &repo.OpenIssuesCount, &repo.PrimaryLanguage,
-		&repo.CreatedAt, &repo.UpdatedAt,
-	)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("repository not found")
-		}
-		return nil, fmt.Errorf("failed to fetch repository: %w", err)
-	}
-
-	return &repo, nil
-}
-
-// GetByUserID retrieves all repositories for a user
-func (rs *RepositoryService) GetByUserID(ctx context.Context, userID int) ([]Repository, error) {
-	rows, err := rs.DB.QueryContext(
-		ctx,
-		`SELECT id, user_id, full_name, owner, name, url, description,
-		        stars_count, forks_count, watchers_count, open_issues_count,
-		        primary_language, created_at, updated_at
-		 FROM repositories WHERE user_id = $1 ORDER BY created_at DESC`,
-		userID,
-	)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch repositories: %w", err)
+		return nil, fmt.Errorf("failed to list repositories: %w", err)
 	}
 	defer rows.Close()
 
-	var repos []Repository
-
+	var repos []*Repository
 	for rows.Next() {
-		var repo Repository
-
+		repo := &Repository{}
 		err := rows.Scan(
-			&repo.ID, &repo.UserID, &repo.FullName, &repo.Owner, &repo.Name,
-			&repo.URL, &repo.Description, &repo.StarsCount, &repo.ForksCount,
-			&repo.WatchersCount, &repo.OpenIssuesCount, &repo.PrimaryLanguage,
-			&repo.CreatedAt, &repo.UpdatedAt,
+			&repo.ID,
+			&repo.UserID,
+			&repo.GitHubURL,
+			&repo.Owner,
+			&repo.Name,
+			&repo.Description,
+			&repo.PrimaryLanguage,
+			&repo.StarsCount,
+			&repo.ForksCount,
+			&repo.CreatedAt,
+			&repo.UpdatedAt,
 		)
-
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan repository: %w", err)
 		}
-
 		repos = append(repos, repo)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error iterating repositories: %w", err)
 	}
 
 	return repos, nil
 }
 
-// Update updates an existing repository
-func (rs *RepositoryService) Update(ctx context.Context, repo *Repository) error {
-	_, err := rs.DB.ExecContext(
-		ctx,
-		`UPDATE repositories SET full_name = $1, owner = $2, name = $3,
-		                        url = $4, description = $5, stars_count = $6,
-		                        forks_count = $7, watchers_count = $8,
-		                        open_issues_count = $9, primary_language = $10,
-		                        updated_at = NOW()
-		 WHERE id = $11`,
-		repo.FullName, repo.Owner, repo.Name, repo.URL, repo.Description,
-		repo.StarsCount, repo.ForksCount, repo.WatchersCount,
-		repo.OpenIssuesCount, repo.PrimaryLanguage, repo.ID,
+// ByUserAndURL finds a repository by user ID and GitHub URL.
+func (s *RepositoryService) ByUserAndURL(ctx context.Context, userID int64, githubURL string) (*Repository, error) {
+	// Normalize URL
+	owner, name, err := ParseGitHubURL(githubURL)
+	if err != nil {
+		return nil, err
+	}
+	normalizedURL := fmt.Sprintf("https://github.com/%s/%s", owner, name)
+
+	query := `
+		SELECT id, user_id, github_url, owner, name, description, primary_language, stars_count, forks_count, created_at, updated_at
+		FROM repositories
+		WHERE user_id = $1 AND github_url = $2
+	`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	repo := &Repository{}
+	err = s.pool.QueryRow(ctx, query, userID, normalizedURL).Scan(
+		&repo.ID,
+		&repo.UserID,
+		&repo.GitHubURL,
+		&repo.Owner,
+		&repo.Name,
+		&repo.Description,
+		&repo.PrimaryLanguage,
+		&repo.StarsCount,
+		&repo.ForksCount,
+		&repo.CreatedAt,
+		&repo.UpdatedAt,
 	)
 
 	if err != nil {
-		return fmt.Errorf("failed to update repository: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRepositoryNotFound
+		}
+		return nil, fmt.Errorf("failed to get repository: %w", err)
+	}
+
+	return repo, nil
+}
+
+// on delete, the associated analysis is also deleted (on cascade)
+func (s *RepositoryService) Delete(ctx context.Context, id int64) error {
+	query := `DELETE FROM repositories WHERE id = $1`
+
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	result, err := s.pool.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete repository: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return ErrRepositoryNotFound
 	}
 
 	return nil
 }
 
-// Delete deletes a repository
-func (rs *RepositoryService) Delete(ctx context.Context, id int64) error {
-	_, err := rs.DB.ExecContext(
-		ctx,
-		`DELETE FROM repositories WHERE id = $1`,
-		id,
-	)
+// CountByUser returns the number of repositories for a user.
+func (s *RepositoryService) CountByUser(ctx context.Context, userID int64) (int, error) {
+	query := `SELECT COUNT(*) FROM repositories WHERE user_id = $1`
 
-	return err
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	var count int
+	err := s.pool.QueryRow(ctx, query, userID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count repositories: %w", err)
+	}
+
+	return count, nil
+}
+
+// HELPER FUNCS ------------------------------------------------------
+
+// FullName returns the owner/repo format.
+func (r *Repository) FullName() string {
+	return fmt.Sprintf("%s/%s", r.Owner, r.Name)
+}
+
+// CanonicalURL returns the full GitHub URL.
+func (r *Repository) CanonicalURL() string {
+	return fmt.Sprintf("https://github.com/%s/%s", r.Owner, r.Name)
+}
+
+// ShortDescription returns a truncated description for display.
+func (r *Repository) ShortDescription(maxLen int) string {
+	if r.Description == nil || *r.Description == "" {
+		return "No description"
+	}
+	desc := *r.Description
+	if len(desc) <= maxLen {
+		return desc
+	}
+	return desc[:maxLen-3] + "..."
 }
