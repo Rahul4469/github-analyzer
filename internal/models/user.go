@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -277,6 +278,30 @@ func (s *UserService) ResetAPIQuota(ctx context.Context, userID int64) error {
 		return fmt.Errorf("failed to reset API quota: %w", err)
 	}
 
+	return nil
+}
+
+// VerifyGitHubToken checks if the provided token matches the stored hash.
+// Returns true if the token matches, false otherwise.
+func (s *UserService) VerifyGitHubToken(ctx context.Context, userID int64, token string) (bool, error) {
+	user, err := s.ByID(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+
+	if user.GitHubTokenHash == nil {
+		return false, nil
+	}
+
+	providedHash := hashToken(token)
+	return *user.GitHubTokenHash == providedHash, nil
+}
+
+// NullStringToPtr converts sql.NullString to *string for cleaner model fields.
+func NullStringToPtr(ns sql.NullString) *string {
+	if ns.Valid {
+		return &ns.String
+	}
 	return nil
 }
 
