@@ -9,6 +9,7 @@ CREATE TABLE repositories (
     description      TEXT,
     primary_language VARCHAR(100),
     stars_count      INTEGER DEFAULT 0,
+    forks_count      INTEGER DEFAULT 0,
     created_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     UNIQUE(user_id, github_url)  -- One entry per user per repo
