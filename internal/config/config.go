@@ -126,7 +126,7 @@ func Load() (*Config, error) {
 	// Load API configuration
 	cfg.APIs = APIConfig{
 		PerplexityAPIKey: os.Getenv("PERPLEXITY_API_KEY"),
-		PerplexityModel:  getEnvOrDefault("PERPLEXITY_MODEL", "llama-3.1-sonar-large-128k-online"),
+		PerplexityModel:  getEnvOrDefault("PERPLEXITY_MODEL", "sonar"),
 		GitHubAPIBaseURL: getEnvOrDefault("GITHUB_API_BASE_URL", "https://api.github.com"),
 	}
 

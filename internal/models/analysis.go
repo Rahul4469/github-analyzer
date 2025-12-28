@@ -329,9 +329,9 @@ func (s *AnalysisService) ByUserID(ctx context.Context, userID int64, limit int)
 	}
 
 	query := `
-		SELECT a.id, a.user_id, a.repository_id, a.status, a.tokens_used, a.error_message, 
+		SELECT a.id, a.user_id, a.repository_id, a.status, a.tokens_used, a.error_message,
 		       a.created_at, a.started_at, a.completed_at,
-		       r.id, r.github_url, r.owner, r.name, r.description, r.primary_language, r.stars_count
+		       r.id, r.github_url, r.owner, r.name, r.description, r.primary_language, r.stars_count, r.forks_count
 		FROM analyses a
 		JOIN repositories r ON a.repository_id = r.id
 		WHERE a.user_id = $1
@@ -368,6 +368,7 @@ func (s *AnalysisService) ByUserID(ctx context.Context, userID int64, limit int)
 			&analysis.Repository.Description,
 			&analysis.Repository.PrimaryLanguage,
 			&analysis.Repository.StarsCount,
+			&analysis.Repository.ForksCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan analysis: %w", err)
