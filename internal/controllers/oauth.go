@@ -194,7 +194,7 @@ func (c *OAuthController) GitHubCallback(w http.ResponseWriter, r *http.Request)
 // GET /auth/github/connect (requires authentication)
 func (c *OAuthController) GitHubConnect(w http.ResponseWriter, r *http.Request) {
 	// This is the same as login, but for connecting to existing account
-	c.GitHubLogin(w, r)
+	c.GitHubLogin(w, r) // This initiates the OAuth2-github authorization
 }
 
 // GitHubDisconnect removes GitHub connection from user's account.

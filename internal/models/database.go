@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib" // Register pgx driver for database/sql
 	"github.com/pressly/goose/v3"
 )
 
@@ -20,6 +21,7 @@ import (
 // - Context-aware queries with timeouts
 type Database struct {
 	Pool *pgxpool.Pool
+	DB   *sql.DB // For migrations only
 }
 
 // DatabaseConfig holds settings for the database connection.
@@ -66,12 +68,22 @@ func NewDatabase(ctx context.Context, cfg DatabaseConfig) (*Database, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	return &Database{Pool: pool}, nil
+	// Create sql.DB connection for migrations using pgx stdlib driver
+	sqlDB, err := sql.Open("pgx", cfg.URL)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("failed to create sql.DB for migrations: %w", err)
+	}
+
+	return &Database{Pool: pool, DB: sqlDB}, nil
 }
 
 // Close should be called while shutting down db connection- via defer
 func (db *Database) Close() {
 	db.Pool.Close()
+	if db.DB != nil {
+		db.DB.Close()
+	}
 }
 
 // to check databse connection (like ping from the good old days)

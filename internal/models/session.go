@@ -108,9 +108,11 @@ func (s *SessionService) User(ctx context.Context, token string) (*User, error) 
 
 	// Join sessions with users to get user data in one query
 	query := `
-		SELECT 
-			u.id, u.email, u.password_hash, u.github_token_hash, 
+		SELECT
+			u.id, u.email, u.password_hash, u.github_token_hash,
 			u.api_quota_used, u.api_quota_limit, u.created_at, u.updated_at,
+			u.github_id, u.github_username, u.github_access_token_encrypted,
+			u.github_token_expires_at, u.github_connected_at,
 			s.expires_at
 		FROM sessions s
 		JOIN users u ON s.user_id = u.id
@@ -132,6 +134,11 @@ func (s *SessionService) User(ctx context.Context, token string) (*User, error) 
 		&user.APIQuotaLimit,
 		&user.CreatedAt,
 		&user.UpdatedAt,
+		&user.GitHubID,
+		&user.GitHubUsername,
+		&user.GitHubAccessTokenEncrypted,
+		&user.GitHubTokenExpiresAt,
+		&user.GitHubConnectedAt,
 		&expiresAt,
 	)
 
@@ -257,13 +264,6 @@ func (s *SessionService) Extend(ctx context.Context, token string, duration time
 	return nil
 }
 
-// HELPER FUNCTIONS -------------------------------------
-
-func hashSessionToken(token string) string {
-	hash := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(hash[:])
-}
-
 // StartCleanupRoutine starts a background goroutine that periodically
 // cleans up expired sessions. Returns a channel that can be closed to stop cleanup.
 func (s *SessionService) StartCleanupRoutine(interval time.Duration) chan struct{} {
@@ -294,4 +294,11 @@ func (s *SessionService) StartCleanupRoutine(interval time.Duration) chan struct
 	}()
 
 	return stop
+}
+
+// HELPER FUNCTIONS -------------------------------------
+
+func hashSessionToken(token string) string {
+	hash := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(hash[:])
 }

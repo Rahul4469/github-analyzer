@@ -93,9 +93,9 @@ func Load() (*Config, error) {
 
 	// Load server configuration
 	cfg.Server = ServerConfig{
-		Port:        getEnvOrDefault("SERVER_PORT", "8080"),
+		Port:        getEnvOrDefault("SERVER_PORT", "3000"),
 		Environment: getEnvOrDefault("APP_ENV", "development"),
-		BaseURL:     getEnvOrDefault("BASE_URL", "http://localhost:8080"),
+		BaseURL:     getEnvOrDefault("BASE_URL", "http://localhost:3000"),
 	}
 
 	// Load database configuration
@@ -178,6 +178,13 @@ func (c *Config) validate() error {
 		errs = append(errs, errors.New("CSRF_SECRET is required"))
 	} else if len(c.Security.CSRFSecret) < 32 {
 		errs = append(errs, errors.New("CSRF_SECRET must be at least 32 characters"))
+	}
+
+	// Encryption key must be exactly 32 bytes for AES-256
+	if c.Security.EncryptionKey == "" {
+		errs = append(errs, errors.New("ENCRYPTION_KEY is required"))
+	} else if len(c.Security.EncryptionKey) != 32 {
+		errs = append(errs, errors.New("ENCRYPTION_KEY must be exactly 32 characters (256 bits for AES-256)"))
 	}
 
 	// Perplexity API key is required for analysis features

@@ -1,0 +1,125 @@
+{{define "content"}}
+<!-- Hero Section -->
+<div class="gradient-bg">
+    <div class="max-w-7xl mx-auto py-16 px-4 sm:py-24 sm:px-6 lg:px-8">
+        <div class="text-center">
+            <h1 class="text-4xl font-extrabold text-white sm:text-5xl md:text-6xl">
+                <span class="block">AI-Powered</span>
+                <span class="block text-primary-200">Code Analysis</span>
+            </h1>
+            <p class="mt-6 max-w-2xl mx-auto text-xl text-primary-100">
+                Analyze your GitHub repositories with AI. Find bugs, security vulnerabilities, 
+                and performance issues in seconds.
+            </p>
+            <div class="mt-10 flex justify-center space-x-4">
+                {{if .CurrentUser}}
+                <a href="/analyze" class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-primary-700 bg-white hover:bg-primary-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-primary-700 focus:ring-white">
+                    Analyze Repository
+                    <svg class="ml-2 -mr-1 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"/>
+                    </svg>
+                </a>
+                {{else}}
+                <a href="/signup" class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-primary-700 bg-white hover:bg-primary-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-primary-700 focus:ring-white">
+                    Get Started Free
+                    <svg class="ml-2 -mr-1 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"/>
+                    </svg>
+                </a>
+                <a href="/signin" class="inline-flex items-center px-6 py-3 border-2 border-white text-base font-medium rounded-md text-white hover:bg-white hover:text-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-primary-700 focus:ring-white transition-colors">
+                    Sign In
+                </a>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- How It Works -->
+<div class="py-16 bg-white">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center">
+            <h2 class="text-3xl font-extrabold text-gray-900">How It Works</h2>
+            <p class="mt-4 text-lg text-gray-500">Three simple steps to analyze your code</p>
+        </div>
+        
+        <div class="mt-12">
+            <div class="grid grid-cols-1 gap-8 md:grid-cols-3">
+                <!-- Step 1 -->
+                <div class="text-center">
+                    <div class="flex items-center justify-center h-16 w-16 rounded-full bg-primary-100 text-primary-600 mx-auto">
+                        <span class="text-2xl font-bold">1</span>
+                    </div>
+                    <h3 class="mt-6 text-lg font-medium text-gray-900">Connect GitHub</h3>
+                    <p class="mt-2 text-gray-500">
+                        Securely connect your GitHub account with one click. We only request read access.
+                    </p>
+                </div>
+                
+                <!-- Step 2 -->
+                <div class="text-center">
+                    <div class="flex items-center justify-center h-16 w-16 rounded-full bg-primary-100 text-primary-600 mx-auto">
+                        <span class="text-2xl font-bold">2</span>
+                    </div>
+                    <h3 class="mt-6 text-lg font-medium text-gray-900">Enter Repository URL</h3>
+                    <p class="mt-2 text-gray-500">
+                        Paste any GitHub repository URL. We fetch the source code and prepare it for analysis.
+                    </p>
+                </div>
+                
+                <!-- Step 3 -->
+                <div class="text-center">
+                    <div class="flex items-center justify-center h-16 w-16 rounded-full bg-primary-100 text-primary-600 mx-auto">
+                        <span class="text-2xl font-bold">3</span>
+                    </div>
+                    <h3 class="mt-6 text-lg font-medium text-gray-900">Get Results</h3>
+                    <p class="mt-2 text-gray-500">
+                        AI analyzes your code and provides actionable insights with severity levels and fix suggestions.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Features Section -->
+<div class="py-16 bg-gray-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center">
+            <h2 class="text-3xl font-extrabold text-gray-900">Powerful Features</h2>
+            <p class="mt-4 text-lg text-gray-500">Everything you need to improve your code quality</p>
+        </div>
+        
+        <div class="mt-12 grid gap-8 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+            {{range .Data.Features}}
+            <div class="bg-white rounded-lg shadow-sm p-6 card-hover border border-gray-100">
+                <div class="text-4xl mb-4">{{.Icon}}</div>
+                <h3 class="text-lg font-semibold text-gray-900">{{.Title}}</h3>
+                <p class="mt-2 text-gray-500">{{.Description}}</p>
+            </div>
+            {{end}}
+        </div>
+    </div>
+</div>
+
+<!-- CTA Section -->
+<div class="bg-primary-700">
+    <div class="max-w-7xl mx-auto py-12 px-4 sm:px-6 lg:py-16 lg:px-8 lg:flex lg:items-center lg:justify-between">
+        <h2 class="text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
+            <span class="block">Ready to improve your code?</span>
+            <span class="block text-primary-200">Start analyzing for free today.</span>
+        </h2>
+        <div class="mt-8 flex lg:mt-0 lg:flex-shrink-0">
+            {{if .CurrentUser}}
+            <a href="/analyze" class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-primary-700 bg-white hover:bg-primary-50">
+                Analyze Now
+            </a>
+            {{else}}
+            <a href="/signup" class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-primary-700 bg-white hover:bg-primary-50">
+                Get Started
+            </a>
+            {{end}}
+        </div>
+    </div>
+</div>
+{{end}}

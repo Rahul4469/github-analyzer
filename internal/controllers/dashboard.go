@@ -32,7 +32,7 @@ func NewDashboardController(
 // DashboardData holds data for the dashboard template.
 type DashboardData struct {
 	Analyses      []*models.Analysis
-	StatusCounts  map[models.AnalysisStatus]int
+	StatusCounts  map[string]int
 	TotalAnalyses int
 	QuotaUsed     int
 	QuotaLimit    int
@@ -56,6 +56,12 @@ func (c *DashboardController) GetDashboard(w http.ResponseWriter, r *http.Reques
 		statusCounts = make(map[models.AnalysisStatus]int)
 	}
 
+	// Convert AnalysisStatus keys to strings for template compatibility
+	stringStatusCounts := make(map[string]int)
+	for status, count := range statusCounts {
+		stringStatusCounts[string(status)] = count
+	}
+
 	// Calculate total
 	totalAnalyses := 0
 	for _, count := range statusCounts {
@@ -68,7 +74,7 @@ func (c *DashboardController) GetDashboard(w http.ResponseWriter, r *http.Reques
 		CurrentUser: user,
 		Data: DashboardData{
 			Analyses:      analyses,
-			StatusCounts:  statusCounts,
+			StatusCounts:  stringStatusCounts,
 			TotalAnalyses: totalAnalyses,
 			QuotaUsed:     user.APIQuotaUsed,
 			QuotaLimit:    user.APIQuotaLimit,

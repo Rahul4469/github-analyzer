@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -55,7 +54,7 @@ func DefaultFuncMap() template.FuncMap {
 		// String manipulation
 		"upper":    strings.ToUpper,
 		"lower":    strings.ToLower,
-		"title":    strings.Title,
+		"title":    toTitle,
 		"trim":     strings.TrimSpace,
 		"truncate": truncate,
 
@@ -131,7 +130,7 @@ func ParseFS(patterns ...string) (*Template, error) {
 		return nil, fmt.Errorf("failed to parse base template: %w", err)
 	}
 
-	// Parse all partials
+	// Parse all partials - they define their own names with {{define "name"}}
 	partialPattern := "templates/partials/*.gohtml"
 	partialMatches, err := fs.Glob(TemplateFS, partialPattern)
 	if err != nil {
@@ -144,17 +143,14 @@ func ParseFS(patterns ...string) (*Template, error) {
 			return nil, fmt.Errorf("failed to read partial %s: %w", match, err)
 		}
 
-		// Use filename without extension as template name
-		name := filepath.Base(match)
-		name = strings.TrimSuffix(name, ".gohtml")
-
-		tmpl, err = tmpl.New(name).Parse(string(content))
+		// Parse the content - it contains its own {{define}} blocks
+		tmpl, err = tmpl.Parse(string(content))
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse partial %s: %w", match, err)
 		}
 	}
 
-	// Parse the requested page templates
+	// Parse the requested page templates - they define their own "content" block
 	for _, pattern := range patterns {
 		fullPattern := "templates/" + pattern
 		content, err := fs.ReadFile(TemplateFS, fullPattern)
@@ -162,8 +158,8 @@ func ParseFS(patterns ...string) (*Template, error) {
 			return nil, fmt.Errorf("failed to read template %s: %w", pattern, err)
 		}
 
-		// Use "page" as the name for the main content template
-		tmpl, err = tmpl.New("page").Parse(string(content))
+		// Parse the content - pages define {{define "content"}} and use {{template "base" .}}
+		tmpl, err = tmpl.Parse(string(content))
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse template %s: %w", pattern, err)
 		}
@@ -236,6 +232,21 @@ func truncate(s string, length int) string {
 		return s
 	}
 	return s[:length-3] + "..."
+}
+
+// toTitle converts a string to title case.
+// Example: "hello world" -> "Hello World"
+func toTitle(s string) string {
+	if s == "" {
+		return s
+	}
+	words := strings.Fields(s)
+	for i, word := range words {
+		if len(word) > 0 {
+			words[i] = strings.ToUpper(string(word[0])) + strings.ToLower(word[1:])
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 func formatDate(t time.Time) string {
