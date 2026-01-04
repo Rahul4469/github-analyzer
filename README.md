@@ -2,7 +2,7 @@
 
 AI-powered code analysis for GitHub repositories. Analyze your code for bugs, security vulnerabilities, and performance issues using AI.
 
-![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)
+![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go)
 
 ## Features
 
@@ -20,7 +20,7 @@ Go, PostgreSQL, Chi router, Perplexity AI, Docker, Tailwind CSS
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.24+
 - PostgreSQL 15+
 - Docker & Docker Compose (optional)
 - GitHub OAuth App credentials

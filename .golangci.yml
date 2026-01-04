@@ -16,7 +16,6 @@ linters:
     - contextcheck  # Context checking
     - durationcheck # Duration checks
     - errorlint     # Error wrapping
-    - exportloopref # Loop variable capture
     - nilerr        # nil error returns
     - sqlclosecheck # SQL close checks
 
