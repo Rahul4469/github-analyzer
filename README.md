@@ -94,7 +94,3 @@ make lint         # Run linter
 ## Security
 
 Bcrypt password hashing, AES-256 token encryption, CSRF protection, parameterized queries.
-
-## License
-
-MIT

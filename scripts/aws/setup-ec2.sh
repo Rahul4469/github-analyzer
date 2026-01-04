@@ -213,7 +213,7 @@ www.gitanalyze.online {
     
     encode gzip
 }
-CADDYOF  
+CADDYOF
     echo "  Created Caddyfile"
     echo ""
     echo "   IMPORTANT: Edit Caddyfile with your actual values!"
