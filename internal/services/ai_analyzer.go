@@ -88,6 +88,7 @@ type PerplexityResponse struct {
 func (s *PerplexityService) Analyze(ctx context.Context, input AnalysisInput) (*AnalysisResult, error) {
 	prompt := s.buildPrompt(input)
 
+	// Build the request to be sent to ai
 	request := PerplexityRequest{
 		Model: s.model,
 		Messages: []PerplexityMessage{
@@ -115,6 +116,7 @@ func (s *PerplexityService) Analyze(ctx context.Context, input AnalysisInput) (*
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
+	// Send the request and receive response using http.Do()
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call Perplexity API: %w", err)
@@ -444,8 +446,8 @@ func (s *PerplexityService) buildSummary(issues []models.Issue, rawAnalysis stri
 	// Calculate overall score (0-100)
 	// Start at 100, deduct points for issues
 	score := 100
-	score -= summary.IssuesBySeverity["HIGH"] * 15
-	score -= summary.IssuesBySeverity["MEDIUM"] * 8
+	score -= summary.IssuesBySeverity["HIGH"] * 10
+	score -= summary.IssuesBySeverity["MEDIUM"] * 5
 	score -= summary.IssuesBySeverity["LOW"] * 3
 	score -= summary.IssuesBySeverity["INFO"] * 1
 	if score < 0 {

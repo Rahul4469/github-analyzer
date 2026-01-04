@@ -28,5 +28,8 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+
+# AWS credentials (if you create any credential files)
+# scripts/aws/  # Commented out - scripts are safe to commit

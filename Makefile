@@ -1,9 +1,3 @@
-# ===========================================
-# GitHub Analyzer - Makefile
-# ===========================================
-# Usage: make <target>
-# Run 'make help' to see all available targets
-
 .PHONY: help build run dev clean test migrate-up migrate-down migrate-status migrate-create deps lint
 
 # Default target
@@ -96,18 +90,34 @@ lint:
 ## migrate-up: Run all pending migrations
 migrate-up:
 	@echo "$(COLOR_GREEN)Running migrations...$(COLOR_RESET)"
-	goose -dir $(MIGRATIONS_DIR) postgres "host=localhost port=5432 user=rahul password=junglebook dbname=gitanalyze sslmode=disable" up
+	@if [ -z "$(DATABASE_URL)" ]; then \
+		echo "$(COLOR_YELLOW)Loading from .env file...$(COLOR_RESET)"; \
+		export $$(cat .env | grep -v '^#' | xargs) && \
+		goose -dir $(MIGRATIONS_DIR) postgres "$$DATABASE_URL" up; \
+	else \
+		goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)" up; \
+	fi
 	@echo "$(COLOR_GREEN)Migrations complete$(COLOR_RESET)"
 
 ## migrate-down: Rollback the last migration
 migrate-down:
 	@echo "$(COLOR_YELLOW)Rolling back last migration...$(COLOR_RESET)"
-	goose -dir $(MIGRATIONS_DIR) postgres "host=localhost port=5432 user=rahul password=junglebook dbname=gitanalyze sslmode=disable" down
+	@if [ -z "$(DATABASE_URL)" ]; then \
+		export $$(cat .env | grep -v '^#' | xargs) && \
+		goose -dir $(MIGRATIONS_DIR) postgres "$$DATABASE_URL" down; \
+	else \
+		goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)" down; \
+	fi
 
 ## migrate-status: Show migration status
 migrate-status:
 	@echo "$(COLOR_BLUE)Migration status:$(COLOR_RESET)"
-	goose -dir $(MIGRATIONS_DIR) postgres "host=localhost port=5432 user=rahul password=junglebook dbname=gitanalyze sslmode=disable" status
+	@if [ -z "$(DATABASE_URL)" ]; then \
+		export $$(cat .env | grep -v '^#' | xargs) && \
+		goose -dir $(MIGRATIONS_DIR) postgres "$$DATABASE_URL" status; \
+	else \
+		goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)" status; \
+	fi
 
 ## migrate-create: Create a new migration file (usage: make migrate-create name=create_users)
 migrate-create:
@@ -123,8 +133,14 @@ migrate-create:
 migrate-reset:
 	@echo "$(COLOR_YELLOW)WARNING: This will delete all data!$(COLOR_RESET)"
 	@read -p "Are you sure? [y/N] " confirm && [ "$$confirm" = "y" ] || exit 1
-	goose -dir $(MIGRATIONS_DIR) postgres "host=localhost port=5432 user=rahul password=junglebook dbname=gitanalyze sslmode=disable" reset
-	goose -dir $(MIGRATIONS_DIR) postgres "host=localhost port=5432 user=rahul password=junglebook dbname=gitanalyze sslmode=disable" up
+	@if [ -z "$(DATABASE_URL)" ]; then \
+		export $$(cat .env | grep -v '^#' | xargs) && \
+		goose -dir $(MIGRATIONS_DIR) postgres "$$DATABASE_URL" reset && \
+		goose -dir $(MIGRATIONS_DIR) postgres "$$DATABASE_URL" up; \
+	else \
+		goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)" reset && \
+		goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)" up; \
+	fi
 
 # ===========================================
 # Database Setup Commands
@@ -133,7 +149,7 @@ migrate-reset:
 ## db-create: Create the database (requires psql)
 db-create:
 	@echo "$(COLOR_GREEN)Creating database...$(COLOR_RESET)"
-	createdb -U postgres gitanalyze || echo "Database may already exist"
+	createdb -U postgres github_analyzer || echo "Database may already exist"
 
 ## db-drop: Drop the database (DESTRUCTIVE!)
 db-drop:
@@ -163,3 +179,56 @@ install-tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 	go install github.com/pressly/goose/v3/cmd/goose@latest
 	@echo "$(COLOR_GREEN)Tools installed$(COLOR_RESET)"
+
+# ===========================================
+# Docker Commands
+# ===========================================
+
+## docker-build: Build Docker image
+docker-build:
+	@echo "$(COLOR_GREEN)Building Docker image...$(COLOR_RESET)"
+	docker build -t github-analyzer:latest .
+
+## docker-run: Run with Docker Compose (development)
+docker-run:
+	@echo "$(COLOR_GREEN)Starting with Docker Compose...$(COLOR_RESET)"
+	docker-compose up -d
+	@echo "$(COLOR_GREEN)Application running at http://localhost:8080$(COLOR_RESET)"
+
+## docker-stop: Stop Docker Compose services
+docker-stop:
+	@echo "$(COLOR_YELLOW)Stopping services...$(COLOR_RESET)"
+	docker-compose down
+
+## docker-logs: View Docker logs
+docker-logs:
+	docker-compose logs -f app
+
+## docker-clean: Remove Docker resources
+docker-clean:
+	@echo "$(COLOR_YELLOW)Cleaning Docker resources...$(COLOR_RESET)"
+	docker-compose down -v --rmi local
+	docker image prune -f
+
+# ===========================================
+# Production/AWS Commands
+# ===========================================
+
+## aws-setup: Setup AWS infrastructure
+aws-setup:
+	@echo "$(COLOR_GREEN)Setting up AWS infrastructure...$(COLOR_RESET)"
+	./scripts/aws/setup-aws.sh
+
+## aws-cleanup: Remove all AWS resources
+aws-cleanup:
+	@echo "$(COLOR_YELLOW)Cleaning up AWS resources...$(COLOR_RESET)"
+	./scripts/aws/cleanup-aws.sh
+
+## docker-prod: Run production Docker Compose locally
+docker-prod:
+	@echo "$(COLOR_GREEN)Starting production configuration...$(COLOR_RESET)"
+	docker-compose -f docker-compose.prod.yml up -d
+
+## docker-prod-stop: Stop production Docker Compose
+docker-prod-stop:
+	docker-compose -f docker-compose.prod.yml down

@@ -1,0 +1,54 @@
+FROM golang:1.23-alpine
+
+WORKDIR /app
+
+# Install development tools
+RUN apk add --no-cache \
+    git \
+    gcc \
+    musl-dev \
+    nodejs \
+    npm
+
+# Install Air for hot reload
+RUN go install github.com/cosmtrek/air@latest
+
+# Install Tailwind CSS dependencies (will be cached if package.json unchanged)
+COPY tailwind/package*.json ./tailwind/
+WORKDIR /app/tailwind
+RUN npm ci
+
+# Back to app directory
+WORKDIR /app
+
+# Copy go mod files for dependency caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy Tailwind config
+COPY tailwind/tailwind.config.js ./tailwind/
+COPY tailwind/postcss.config.js ./tailwind/
+
+# Create Air config for hot reload
+RUN echo 'root = "." \n\
+tmp_dir = "tmp" \n\
+\n\
+[build] \n\
+  cmd = "go build -o ./tmp/main ./cmd/server" \n\
+  bin = "tmp/main" \n\
+  include_ext = ["go", "gohtml"] \n\
+  exclude_dir = ["tmp", "vendor", "node_modules"] \n\
+  delay = 1000 \n\
+\n\
+[color] \n\
+  main = "magenta" \n\
+  watcher = "cyan" \n\
+  build = "yellow" \n\
+  runner = "green" \n\
+' > .air.toml
+
+# Expose ports
+EXPOSE 3000
+
+# Start script that runs both CSS watch and Go hot reload
+CMD sh -c "cd /app/tailwind && npm run watch:css & cd /app && air"

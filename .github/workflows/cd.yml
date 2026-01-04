@@ -1,0 +1,207 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (default: latest commit SHA)'
+        required: false
+        default: ''
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: github-analyzer
+
+jobs:
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ steps.build-image.outputs.image_tag }}
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials  
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
+        run: |
+          echo "Building Docker image..."
+          echo "Registry: $ECR_REGISTRY"
+          echo "Repository: $ECR_REPOSITORY"
+          echo "Tag: $IMAGE_TAG"
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+                     $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "Pushing to ECR..."           
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Image pushed successfully!"
+          echo "Full URI: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get ECR login password
+        id: ecr-login
+        run: |
+          ECR_PASSWORD=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
+          echo "::add-mask::$ECR_PASSWORD"
+          echo "password=$ECR_PASSWORD" >> $GITHUB_OUTPUT
+
+      - name: Get AWS Account ID
+        id: aws-account
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 60s
+          envs: AWS_REGION,ECR_REPOSITORY
+          script: |
+            set -e  # Exit on any error
+            
+            echo "=============================================="
+            echo "  Deploying GitHub Analyzer"
+            echo "=============================================="
+            
+            # Variables
+            AWS_ACCOUNT_ID="${{ steps.aws-account.outputs.account_id }}"
+            ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+            IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+            
+            echo "Account ID: $AWS_ACCOUNT_ID"
+            echo "Registry: $ECR_REGISTRY"
+            echo "Image Tag: $IMAGE_TAG"
+            
+            # Navigate to app directory
+            cd /home/ec2-user/github-analyzer
+            
+            # Login to ECR
+            echo ""
+            echo "Logging into ECR..."
+            echo "${{ steps.ecr-login.outputs.password }}" | \
+              docker login --username AWS --password-stdin $ECR_REGISTRY
+            
+            # Backup current .env (in case we need to rollback)
+            if [ -f .env ]; then
+              cp .env .env.backup
+            fi
+            
+            # Update IMAGE_TAG in .env
+            echo ""
+            echo "Updating IMAGE_TAG to: $IMAGE_TAG"
+            sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=$IMAGE_TAG|" .env
+            
+            # Pull new image
+            echo ""
+            echo "Pulling new image..."
+            docker pull $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+            
+            # Stop old containers
+            echo ""
+            echo "Stopping old containers..."
+            docker-compose -f docker-compose.prod.yml down || true
+            
+            # Start new containers
+            echo ""
+            echo "Starting new containers..."
+            docker-compose -f docker-compose.prod.yml up -d
+            
+            # Wait for containers to start
+            echo ""
+            echo "Waiting for containers to be healthy..."
+            sleep 15
+            
+            # Health check
+            echo ""
+            echo "Running health check..."
+            HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health || echo "000")
+            
+            if [ "$HEALTH_STATUS" = "200" ]; then
+              echo "Health check passed!"
+              
+              # Clean up old images
+              echo ""
+              echo "Cleaning up old images..."
+              docker image prune -af --filter "until=24h"
+              
+              echo ""
+              echo "=============================================="
+              echo "  DEPLOYMENT SUCCESSFUL!"
+              echo "=============================================="
+              echo "  Image: $IMAGE_TAG"
+              echo "  URL: http://${{ secrets.EC2_HOST }}"
+              echo "=============================================="
+            else
+              echo "Health check failed! Status: $HEALTH_STATUS"
+              echo ""
+              echo "Rolling back..."
+              
+              # Restore previous .env
+              if [ -f .env.backup ]; then
+                cp .env.backup .env
+              fi
+              
+              # Show logs for debugging
+              echo ""
+              echo "Container logs:"
+              docker-compose -f docker-compose.prod.yml logs --tail=50
+              
+              exit 1
+            fi
+
+      - name: Verify deployment
+        run: |
+          echo "Verifying deployment from GitHub Actions runner..."
+          
+          # Wait a bit for everything to stabilize
+          sleep 5
+          
+          # Check health endpoint
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.EC2_HOST }}/health || echo "000")
+          
+          if [ "$RESPONSE" = "200" ]; then
+            echo "Deployment verified! Application is responding."
+          else
+            echo "Warning: Could not verify deployment from external check."
+            echo "Response code: $RESPONSE"
+            echo "This might be a network issue. Check the EC2 deployment logs."
+          fi

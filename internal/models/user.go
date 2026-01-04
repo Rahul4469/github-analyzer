@@ -19,7 +19,7 @@ type User struct {
 	ID              int64     `json:"id"`
 	Email           string    `json:"email"`
 	PasswordHash    string    `json:"-"`
-	GitHubTokenHash *string   `json:"-"` // never expose
+	GitHubTokenHash *string   `json:"-"`
 	APIQuotaUsed    int       `json:"api_quota_used"`
 	APIQuotaLimit   int       `json:"api_quota_limit"`
 	CreatedAt       time.Time `json:"created_at"`
@@ -28,7 +28,7 @@ type User struct {
 	// GitHub OAuth fields
 	GitHubID                   *int64     `json:"github_id,omitempty"`
 	GitHubUsername             *string    `json:"github_username,omitempty"`
-	GitHubAccessTokenEncrypted *string    `json:"-"` // never expose
+	GitHubAccessTokenEncrypted *string    `json:"-"`
 	GitHubTokenExpiresAt       *time.Time `json:"-"`
 	GitHubConnectedAt          *time.Time `json:"github_connected_at,omitempty"`
 }

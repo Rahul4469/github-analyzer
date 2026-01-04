@@ -3,15 +3,38 @@ version: "3.9"
 services:
   db: # The service will be named db. 
     image: postgres:16-alpine 
-    restart: always 
-    container_name: github_analyzer_db
+    restart: unless-stopped 
+    container_name: github-analyzer-db
     environment: 
       POSTGRES_USER: ${PSQL_USER} 
       POSTGRES_PASSWORD: ${PSQL_PASSWORD}
       POSTGRES_DB: ${PSQL_DATABASE} 
     ports: # Expose ports so that apps not running via docker-compose can connect to them.
       - 5432:5432  
-  
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PSQL_USER:-postgres} -d ${PSQL_DATABASE:-github_analyzer}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# Migrations ---------------------
+  migrate:
+    image: golang:1.21-alpine
+    container_name: github-analyzer-migrate
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    environment:
+      DATABASE_URL: postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable
+    command: >
+      sh -c "
+        apk add --no-cache git &&
+        go install github.com/pressly/goose/v3/cmd/goose@latest &&
+        goose -dir /migrations postgres \"$$DATABASE_URL\" up
+      "
+
   adminer:
     image: adminer
     restart: always
@@ -19,3 +42,38 @@ services:
       ADMINER_DESIGN: dracula # Pick a theme - https://github.com/vrana/adminer/tree/master/designs
     ports:
       - 3333:8080    
+
+# Application (Development with hot Relead)
+
+app:
+  build:
+    context: .
+    dockerfile: Dockerfile.dev
+  container_name: github_analyzer_app
+  restart: unless-stopped
+  depends_on:
+    db:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully    
+  # Exposed directly for development (no Caddy)
+  ports:
+    - "3000:3000"
+  environment:
+     - APP_ENV=development
+      - SERVER_PORT=3000
+      - BASE_URL=http://localhost:3000
+      - DATABASE_URL=postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable
+      - CSRF_SECRET=${CSRF_SECRET:-dev-csrf-secret-change-me-32char}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-dev-encryption-key-32-chars!!}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
+      - GITHUB_REDIRECT_URL=http://localhost:3000/auth/github/callback
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}      
+  volumes:
+      - .:/app
+      - go_modules:/go/pkg/mod
+
+volumes:
+  postgres_data:
+  go_modules:          
