@@ -274,9 +274,9 @@ services:
       retries: 5
       start_period: 30s
 
-  # OPTIMIZED MIGRATIONS
+  # MIGRATIONS using Goose
   migrate:
-    image: migrate/migrate:latest
+    image: gomicro/goose:3.18.0
     container_name: github-analyzer-migrate
     depends_on:
       db:
@@ -284,16 +284,13 @@ services:
     volumes:
       - ./migrations:/migrations:ro
     environment:
-      # Use DATABASE_URL env var to avoid exposing password in command args
-      DATABASE_URL: postgres://\${PSQL_USER:?PSQL_USER is required}:\${PSQL_PASSWORD:?PSQL_PASSWORD is required}@db:5432/\${PSQL_DATABASE:?PSQL_DATABASE is required}?sslmode=disable
+      GOOSE_DRIVER: postgres
+      GOOSE_DBSTRING: postgres://\${PSQL_USER:?PSQL_USER is required}:\${PSQL_PASSWORD:?PSQL_PASSWORD is required}@db:5432/\${PSQL_DATABASE:?PSQL_DATABASE is required}?sslmode=disable
+      GOOSE_MIGRATION_DIR: /migrations
     networks:
       - backend
-    command:
-      - "-path"
-      - "/migrations"
-      - "-database"
-      - "\$DATABASE_URL"
-      - "up"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["goose up"]
     # NOTE: Healthcheck removed - migrate container exits after completion,
     # healthchecks cannot run on exited containers. CD workflow checks exit code instead.
 
