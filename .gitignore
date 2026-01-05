@@ -33,3 +33,6 @@ go.work.sum
 
 # AWS credentials (if you create any credential files)
 # scripts/aws/  # Commented out - scripts are safe to commit
+
+#Personal deployment helper commands
+DEPLOYMENT_COMMANDS.md

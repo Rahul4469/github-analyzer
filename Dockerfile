@@ -61,8 +61,8 @@ RUN ls -lh github-analyzer
 
 FROM alpine:latest
 
-# Add ca-certificates for HTTPS requests
-RUN apk --no-cache add ca-certificates tzdata
+# Add ca-certificates for HTTPS requests and wget for healthcheck
+RUN apk --no-cache add ca-certificates tzdata wget
 
 # Create non-root user for security
 RUN addgroup -g 1000 appuser && \
