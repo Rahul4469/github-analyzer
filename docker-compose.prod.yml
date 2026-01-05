@@ -33,9 +33,9 @@ services:
     container_name: github-analyzer-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${PSQL_USER}
-      POSTGRES_PASSWORD: ${PSQL_PASSWORD}
-      POSTGRES_DB: ${PSQL_DATABASE}
+      POSTGRES_USER: ${PSQL_USER:?PSQL_USER is required}
+      POSTGRES_PASSWORD: ${PSQL_PASSWORD:?PSQL_PASSWORD is required}
+      POSTGRES_DB: ${PSQL_DATABASE:?PSQL_DATABASE is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -49,7 +49,7 @@ services:
 
   # OPTIMIZED MIGRATIONS
   migrate:
-    image: migrate/migrate:latest  # ← USE PURPOSE-BUILT MIGRATION IMAGE
+    image: migrate/migrate:latest
     container_name: github-analyzer-migrate
     depends_on:
       db:
@@ -57,23 +57,18 @@ services:
     volumes:
       - ./migrations:/migrations:ro
     environment:
-      DATABASE_URL: postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable
+      # Use DATABASE_URL env var to avoid exposing password in command args
+      DATABASE_URL: postgres://${PSQL_USER:?PSQL_USER is required}:${PSQL_PASSWORD:?PSQL_PASSWORD is required}@db:5432/${PSQL_DATABASE:?PSQL_DATABASE is required}?sslmode=disable
     networks:
       - backend
-    # ← REMOVED slow goose installation
-    command: 
+    command:
       - "-path"
       - "/migrations"
       - "-database"
-      - "postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable"
+      - "$DATABASE_URL"
       - "up"
-    # Add healthcheck to track migration completion
-    healthcheck:
-      test: ["CMD", "migrate", "-path", "/migrations", "-database", "postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable", "version"]
-      interval: 5s
-      timeout: 10s
-      retries: 60
-      start_period: 0s
+    # NOTE: Healthcheck removed - migrate container exits after completion,
+    # healthchecks cannot run on exited containers. CD workflow checks exit code instead.
 
   app:
     image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/github-analyzer:${IMAGE_TAG:-latest}
@@ -83,18 +78,18 @@ services:
       db:
         condition: service_healthy
       migrate:
-        condition: service_completed_successfully  # ← Waits for migrations
+        condition: service_completed_successfully
     environment:
       - APP_ENV=production
       - SERVER_PORT=3000
-      - BASE_URL=${BASE_URL}
-      - DATABASE_URL=postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable
-      - CSRF_SECRET=${CSRF_SECRET}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
-      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
+      - BASE_URL=${BASE_URL:?BASE_URL is required}
+      - DATABASE_URL=postgres://${PSQL_USER:?PSQL_USER is required}:${PSQL_PASSWORD:?PSQL_PASSWORD is required}@db:5432/${PSQL_DATABASE:?PSQL_DATABASE is required}?sslmode=disable
+      - CSRF_SECRET=${CSRF_SECRET:?CSRF_SECRET is required}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:?GITHUB_CLIENT_ID is required}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:?GITHUB_CLIENT_SECRET is required}
       - GITHUB_REDIRECT_URL=${BASE_URL}/auth/github/callback
-      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:?PERPLEXITY_API_KEY is required}
     networks:
       - frontend
       - backend

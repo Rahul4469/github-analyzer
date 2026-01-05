@@ -8,7 +8,8 @@ COPY tailwind/package*.json ./tailwind/
 
 # Install Tailwind dependencies
 WORKDIR /app/tailwind
-RUN npm ci --only=production
+# Install exact dependencies (include dev deps if tailwind is listed there)
+RUN npm ci
 
 # Copy Tailwind configuration and source files
 COPY tailwind/tailwind.config.js ./

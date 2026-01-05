@@ -182,10 +182,10 @@ MAX_REPOS_PER_USER=50
 AWS_ACCOUNT_ID=123456789012
 
 # AWS Region where resources are deployed
-AWS_REGION=us-east-1
+AWS_REGION=ap-south-1
 
 # Docker image tag (updated automatically by CI/CD)
-IMAGE_TAG=<img_tag>  
+IMAGE_TAG=<img_tag>
 ENVOF
     echo "  Created .env file"
     echo ""
@@ -228,14 +228,13 @@ if [ ! -f docker-compose.prod.yml ]; then
 version: '3.8'
 
 services:
-  # CADDY ---------------------------------------------------
   caddy:
     image: caddy:2-alpine
     container_name: github-analyzer-caddy
     restart: unless-stopped
     ports:
-      - "80:80"     # HTTP (for Let's Encrypt challenge & redirect)
-      - "443:443"   # HTTPS (main traffic)
+      - "80:80"
+      - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -256,29 +255,28 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # DATABASE - PostgreSQL -------------------------------------
   db:
     image: postgres:15-alpine
     container_name: github-analyzer-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${PSQL_USER}
-      POSTGRES_PASSWORD: ${PSQL_PASSWORD}
-      POSTGRES_DB: ${PSQL_DATABASE}
+      POSTGRES_USER: \${PSQL_USER:?PSQL_USER is required}
+      POSTGRES_PASSWORD: \${PSQL_PASSWORD:?PSQL_PASSWORD is required}
+      POSTGRES_DB: \${PSQL_DATABASE:?PSQL_DATABASE is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - backend
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PSQL_USER} -d ${PSQL_DATABASE}"]
+      test: ["CMD-SHELL", "pg_isready -U \${PSQL_USER} -d \${PSQL_DATABASE}"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
 
-  # MIGRATIONS ------------------------------------------------
+  # OPTIMIZED MIGRATIONS
   migrate:
-    image: golang:1.24-alpine
+    image: migrate/migrate:latest
     container_name: github-analyzer-migrate
     depends_on:
       db:
@@ -286,22 +284,21 @@ services:
     volumes:
       - ./migrations:/migrations:ro
     environment:
-      DATABASE_URL: postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable
+      # Use DATABASE_URL env var to avoid exposing password in command args
+      DATABASE_URL: postgres://\${PSQL_USER:?PSQL_USER is required}:\${PSQL_PASSWORD:?PSQL_PASSWORD is required}@db:5432/\${PSQL_DATABASE:?PSQL_DATABASE is required}?sslmode=disable
     networks:
       - backend
-    command: >
-      sh -c "
-        echo 'Installing goose...' &&
-        apk add --no-cache git &&
-        go install github.com/pressly/goose/v3/cmd/goose@latest &&
-        echo 'Running migrations...' &&
-        goose -dir /migrations postgres \"$$DATABASE_URL\" up &&
-        echo 'Migrations complete!'
-      "
+    command:
+      - "-path"
+      - "/migrations"
+      - "-database"
+      - "\$DATABASE_URL"
+      - "up"
+    # NOTE: Healthcheck removed - migrate container exits after completion,
+    # healthchecks cannot run on exited containers. CD workflow checks exit code instead.
 
-  # APPLICATION - Go Backend ---------------------------------------------
   app:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/github-analyzer:${IMAGE_TAG:-latest}
+    image: \${AWS_ACCOUNT_ID}.dkr.ecr.\${AWS_REGION}.amazonaws.com/github-analyzer:\${IMAGE_TAG:-latest}
     container_name: github-analyzer-app
     restart: unless-stopped
     depends_on:
@@ -312,23 +309,23 @@ services:
     environment:
       - APP_ENV=production
       - SERVER_PORT=3000
-      - BASE_URL=${BASE_URL}
-      - DATABASE_URL=postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable
-      - CSRF_SECRET=${CSRF_SECRET}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
-      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
-      - GITHUB_REDIRECT_URL=${BASE_URL}/auth/github/callback
-      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
+      - BASE_URL=\${BASE_URL:?BASE_URL is required}
+      - DATABASE_URL=postgres://\${PSQL_USER:?PSQL_USER is required}:\${PSQL_PASSWORD:?PSQL_PASSWORD is required}@db:5432/\${PSQL_DATABASE:?PSQL_DATABASE is required}?sslmode=disable
+      - CSRF_SECRET=\${CSRF_SECRET:?CSRF_SECRET is required}
+      - ENCRYPTION_KEY=\${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      - GITHUB_CLIENT_ID=\${GITHUB_CLIENT_ID:?GITHUB_CLIENT_ID is required}
+      - GITHUB_CLIENT_SECRET=\${GITHUB_CLIENT_SECRET:?GITHUB_CLIENT_SECRET is required}
+      - GITHUB_REDIRECT_URL=\${BASE_URL}/auth/github/callback
+      - PERPLEXITY_API_KEY=\${PERPLEXITY_API_KEY:?PERPLEXITY_API_KEY is required}
     networks:
       - frontend
       - backend
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -341,43 +338,21 @@ services:
       driver: "json-file"
       options:
         max-size: "10m"
-        max-file: "3"      
-
-# NETWORKS ------------------------------------------------------------
-# Isolated networks for security
-# Services can only talk to others on same network
+        max-file: "3"
 
 networks:
-  # Frontend network: Caddy <-> App
   frontend:
     driver: bridge
-  
-  # Backend network: App <-> Database
   backend:
     driver: bridge
-  
-  # NETWORK ISOLATION:
-  # - Caddy can talk to App (both on frontend)
-  # - App can talk to DB (both on backend)
-  # - Caddy CANNOT talk to DB directly (different networks)
-  # - DB CANNOT be reached from internet (not on frontend, no ports exposed)
 
-# VOLUMES ------------------------------------------------------------
-
-# Persistent storage that survives container restarts
 volumes:
-  # PostgreSQL data
   postgres_data:
     driver: local
-  
-  # Caddy certificate storage
-  # IMPORTANT: Persist this to avoid re-requesting certs
   caddy_data:
     driver: local
-  
-  # Caddy config storage
   caddy_config:
-    driver: local            
+    driver: local
 COMPOSEOF
     echo "  Created docker-compose.prod.yml"
     echo ""
@@ -395,35 +370,57 @@ echo "────────────────────────�
 # Deploy script
 cat > deploy.sh << 'DEPLOYEOF'
 #!/bin/bash
-# Deploy latest version
-set -e
-cd /home/ec2-user/github-analyzer
+set -euo pipefail
 
-echo "Logging into ECR..."
-aws ecr get-login-password --region ${AWS_REGION:-us-east-1} | \
-    docker login --username AWS --password-stdin \
-    ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION:-us-east-1}.amazonaws.com
+# Change to application directory
+cd /home/ec2-user/github-analyzer || exit 1
+
+# Load environment variables from .env if present
+if [ -f .env ]; then
+  set -o allexport
+  # shellcheck disable=SC1091
+  source .env
+  set +o allexport
+fi
+
+AWS_REGION=${AWS_REGION:-ap-south-1}
+
+echo "Logging into ECR (region: $AWS_REGION)..."
+if command -v aws >/dev/null 2>&1; then
+  if [ -z "${AWS_ACCOUNT_ID:-}" ]; then
+    echo "AWS_ACCOUNT_ID not set in .env; attempting to discover via AWS CLI..."
+    AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region "$AWS_REGION") || true
+  fi
+  if [ -n "${AWS_ACCOUNT_ID:-}" ]; then
+    aws ecr get-login-password --region "$AWS_REGION" | \
+      docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+  else
+    echo "Warning: AWS account ID missing; ensure instance role or .env contains AWS_ACCOUNT_ID"
+  fi
+else
+  echo "AWS CLI not found on server - cannot login to ECR. Ensure instance has IAM role with ECR pull permissions or install AWS CLI."
+fi
 
 echo "Pulling latest image..."
-docker-compose -f docker-compose.prod.yml pull app
+docker-compose -f docker-compose.prod.yml pull app || true
 
 echo "Stopping old containers..."
-docker-compose -f docker-compose.prod.yml down
+docker-compose -f docker-compose.prod.yml down || true
 
 echo "Starting new containers..."
-docker-compose -f docker-compose.prod.yml up -d
+docker-compose -f docker-compose.prod.yml up -d || { echo "Failed to start containers"; exit 1; }
 
 echo "Cleaning up old images..."
-docker image prune -f
+docker image prune -f || true
 
-echo ""
-echo "Waiting for health check..."
-sleep 10
+echo "\nWaiting for health check..."
+sleep 5
 
-if curl -s http://localhost/health | grep -q "ok"; then
+if curl -sfS --max-time 5 http://localhost/health > /dev/null; then
     echo " Deployment successful!"
 else
     echo " Health check failed. Check logs with: ./logs.sh"
+    exit 1
 fi
 DEPLOYEOF
 chmod +x deploy.sh

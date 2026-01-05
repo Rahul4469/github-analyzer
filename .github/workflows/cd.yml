@@ -86,50 +86,120 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          timeout: 600s  # ← INCREASED from 300s to 600s (10 minutes)
+          timeout: 600s  # ← 10 minutes for deployment including migrations
           script_stop_on_error: true
           script: |
             set -euo pipefail
             trap 'echo "ERROR: Deployment failed"; exit 1' ERR
-            
-            # ...existing code...
-            
-            # Start new containers
-            echo ""
-            echo "Starting new containers..."
-            docker-compose -f docker-compose.prod.yml up -d || \
-              { echo "Failed to start containers!"; exit 1; }
+
+            IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+            ACCOUNT_ID="${{ steps.aws-account.outputs.account_id }}"
+            AWS_REGION="${{ env.AWS_REGION }}"
+
+            echo "Deploying image: $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+
+            # Ensure we're in the app directory (common install location)
+            if [ -d "/home/${{ secrets.EC2_USER }}/github-analyzer" ]; then
+              cd /home/${{ secrets.EC2_USER }}/github-analyzer
+            elif [ -d "$HOME/github-analyzer" ]; then
+              cd $HOME/github-analyzer
+            fi
+
+            # Login to ECR so we can pull images
+            if command -v aws >/dev/null 2>&1; then
+              aws ecr get-login-password --region "$AWS_REGION" | \
+                docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+            else
+              echo "AWS CLI not found on server - cannot login to ECR"
+            fi
+
+            # Backup current .env before making changes
+            if [ -f .env ]; then
+              cp .env .env.backup
+              echo "Backed up current .env"
+            fi
+
+            # Update .env with the new IMAGE_TAG, AWS_ACCOUNT_ID, and AWS_REGION (create if missing)
+            if [ -f .env ]; then
+              if grep -q '^IMAGE_TAG=' .env; then
+                sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$IMAGE_TAG/" .env
+              else
+                echo "IMAGE_TAG=$IMAGE_TAG" >> .env
+              fi
+
+              if grep -q '^AWS_ACCOUNT_ID=' .env; then
+                sed -i "s/^AWS_ACCOUNT_ID=.*/AWS_ACCOUNT_ID=$ACCOUNT_ID/" .env
+              else
+                echo "AWS_ACCOUNT_ID=$ACCOUNT_ID" >> .env
+              fi
+
+              if grep -q '^AWS_REGION=' .env; then
+                sed -i "s/^AWS_REGION=.*/AWS_REGION=$AWS_REGION/" .env
+              else
+                echo "AWS_REGION=$AWS_REGION" >> .env
+              fi
+            else
+              echo "IMAGE_TAG=$IMAGE_TAG" > .env
+              echo "AWS_ACCOUNT_ID=$ACCOUNT_ID" >> .env
+              echo "AWS_REGION=$AWS_REGION" >> .env
+            fi
+
+            # Validate migration files exist
+            if [ ! -d migrations ] || [ -z "$(ls -A migrations 2>/dev/null)" ]; then
+              echo "ERROR: Migration files not found in migrations/ directory"
+              echo "Please ensure migration files are copied to the server"
+              exit 1
+            fi
+
+            # Pull the new image and start containers
+            echo "\nPulling latest image and starting containers..."
+            docker-compose -f docker-compose.prod.yml pull app || true
+            docker-compose -f docker-compose.prod.yml up -d || { echo "Failed to start containers!"; exit 1; }
 
             # Wait for containers to be healthy
             echo ""
             echo "Waiting for containers to be healthy..."
-            
-            MAX_ATTEMPTS=120  # ← INCREASED from 30 to 120 (4 minutes)
+
+            MAX_ATTEMPTS=120  # ← 120 attempts × 2-3 seconds = 4-6 minutes max
             ATTEMPT=0
             HEALTH_OK=false
-            
+
             while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
               ATTEMPT=$((ATTEMPT + 1))
-              
+
               # Check migration status first
               MIGRATE_STATUS=$(docker inspect github-analyzer-migrate --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
-              
+
               if [ "$MIGRATE_STATUS" != "exited" ] && [ "$MIGRATE_STATUS" != "unknown" ]; then
                 echo "[$ATTEMPT/$MAX_ATTEMPTS] Migration still running (status: $MIGRATE_STATUS)..."
                 sleep 3
                 continue
               fi
-              
+
+              # CRITICAL: Check if migration succeeded or failed
+              if [ "$MIGRATE_STATUS" = "exited" ]; then
+                MIGRATE_EXIT_CODE=$(docker inspect github-analyzer-migrate --format='{{.State.ExitCode}}' 2>/dev/null || echo "1")
+                if [ "$MIGRATE_EXIT_CODE" != "0" ]; then
+                  echo ""
+                  echo "✗ Migration failed with exit code: $MIGRATE_EXIT_CODE"
+                  echo ""
+                  echo "Migration logs:"
+                  docker logs github-analyzer-migrate
+                  exit 1
+                else
+                  echo "✓ Migration completed successfully"
+                fi
+              fi
+
               # Now check app health
               if docker ps --filter "name=github-analyzer-app" --filter "status=running" | grep -q github-analyzer-app; then
-                # Try to curl the health endpoint
-                if timeout 5 curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+                if curl -sfS --max-time 5 http://localhost/health > /dev/null 2>&1; then
                   echo "✓ Application is healthy!"
                   HEALTH_OK=true
                   break
                 fi
               fi
-              
+
               echo "[$ATTEMPT/$MAX_ATTEMPTS] Waiting for app to be ready..."
               sleep 2
             done
@@ -147,7 +217,7 @@ jobs:
               
               echo ""
               echo "App container logs (last 100 lines):"
-              docker logs --tail=100 github-analyzer-app 2>/dev/null || echo "No app logs"
+              docker logs --tail=200 github-analyzer-app 2>/dev/null || echo "No app logs"
               
               echo ""
               echo "Rolling back deployment..."
