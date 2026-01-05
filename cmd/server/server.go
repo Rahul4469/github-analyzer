@@ -48,10 +48,10 @@ func main() {
 	log.Println("Connected to database")
 
 	// Run migrations automatically on startup
-	log.Println("Running database migrations...")
-	if err := models.Migrate(db.DB, "./migrations"); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
-	}
+	// log.Println("Running database migrations...")
+	// if err := models.Migrate(db.DB, "./migrations"); err != nil {
+	// 	log.Fatalf("Failed to run migrations: %v", err)
+	// }
 
 	// Initialize Template filesystem (OS filesystem for development)
 	views.TemplateFS = os.DirFS(".").(fs.ReadDirFS)

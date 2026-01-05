@@ -228,8 +228,7 @@ if [ ! -f docker-compose.prod.yml ]; then
 version: '3.8'
 
 services:
-
-# CADDY ---------------------------------------------------
+  # CADDY ---------------------------------------------------
   caddy:
     image: caddy:2-alpine
     container_name: github-analyzer-caddy
@@ -241,74 +240,55 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    networks: # Connect to our internal network
-      - frontend   # Can talk to app
-    # Wait for app to be ready before starting
+    networks:
+      - frontend
     depends_on:
       app:
         condition: service_healthy
-    # Limit resources to prevent runaway processes
     deploy:
       resources:
         limits:
-          cpus: '0.25'      # Max 25% of one CPU
-          memory: 128M      # Max 128 MB RAM
-    # Configure logging to prevent disk fill
+          cpus: '0.25'
+          memory: 128M
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"     # Max 10MB per log file
-        max-file: "3"       # Keep 3 rotated files
+        max-size: "10m"
+        max-file: "3"
 
-# DATABASE - PostgreSQL -------------------------------------
+  # DATABASE - PostgreSQL -------------------------------------
+  db:
+    image: postgres:15-alpine
+    container_name: github-analyzer-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PSQL_USER}
+      POSTGRES_PASSWORD: ${PSQL_PASSWORD}
+      POSTGRES_DB: ${PSQL_DATABASE}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PSQL_USER} -d ${PSQL_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
-db:
-  image: postgres:15-alpine
-  container_name: github-analyzer-db
-  restart: unless-stopped
-  environment:
-    POSTGRES_USER: ${PSQL_USER}
-    POSTGRES_PASSWORD: ${PSQL_PASSWORD}
-    POSTGRES_DB: ${PSQL_DATABASE}
-  volumes:
-    - postgres_data:/var/lib/postgresql/data
-  networks:
-    - backend
-  # Health check - verify PostgreSQL is ready
-  # pg_isready is a PostgreSQL utility that checks connection
-  healthcheck:
-    test: ["CMD-SHELL", "pg_isready -U ${PSQL_USER} -d ${PSQL_DATABASE}"]
-    interval: 10s      # Check every 10 seconds
-    timeout: 5s        # Wait max 5 seconds for response
-    retries: 5         # Mark unhealthy after 5 failures
-    start_period: 30s  # Wait 30s before first check (startup time)      
-
-
-# MIGRATIONS ------------------------------------------------
-migrate:
-    # Use Go image to run goose migrations
-    image: golang:1.21-alpine
-    
+  # MIGRATIONS ------------------------------------------------
+  migrate:
+    image: golang:1.24-alpine
     container_name: github-analyzer-migrate
-    
-    # Wait for database to be healthy before running
     depends_on:
       db:
         condition: service_healthy
-    
-    # Mount migration files from host
     volumes:
       - ./migrations:/migrations:ro
-    
-    # Database connection string
     environment:
       DATABASE_URL: postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable
-    
     networks:
       - backend
-    
-    # Install goose and run migrations
-    # This runs once and exits
     command: >
       sh -c "
         echo 'Installing goose...' &&
@@ -317,23 +297,19 @@ migrate:
         echo 'Running migrations...' &&
         goose -dir /migrations postgres \"$$DATABASE_URL\" up &&
         echo 'Migrations complete!'
-      " 
+      "
 
-# APPLICATION - Go Backend ---------------------------------------------
-
-app:
-  # Image from ECR (pushed by GitHub Actions)
-  # Format: <account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>
-  image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/github-analyzer:${IMAGE_TAG:-latest}
-  container_name: github-analyzer-app
-  restart: unless-stopped
-  # Wait for migrations to complete successfully
-  depends_on:
-    db:
-      condition: service_healthy
-    migrate:
-      condition: service_completed_successfully
-  environment:
+  # APPLICATION - Go Backend ---------------------------------------------
+  app:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/github-analyzer:${IMAGE_TAG:-latest}
+    container_name: github-analyzer-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
       - APP_ENV=production
       - SERVER_PORT=3000
       - BASE_URL=${BASE_URL}
@@ -343,34 +319,29 @@ app:
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
       - GITHUB_REDIRECT_URL=${BASE_URL}/auth/github/callback
-      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}    
-  # Connect to both networks
-  networks:
-    - frontend   # Caddy can reach us
-    - backend    # We can reach database
-  # Health check - verify app is responding
-  healthcheck:
-    test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
-    interval: 30s
-    timeout: 10s
-    retries: 3
-    start_period: 10s  
-
-  # Resource limits
-  deploy:
-    resources:
-      limits:
-        cpus: '0.5'       # Max 50% of one CPU
-        memory: 512M      # Max 512 MB RAM
-      reservations:
-        cpus: '0.25'      # Reserve 25% CPU
-        memory: 256M      # Reserve 256 MB RAM  
-  # Logging configuration
-  logging:
-    driver: "json-file"
-    options:
-      max-size: "10m"
-      max-file: "3"      
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"      
 
 # NETWORKS ------------------------------------------------------------
 # Isolated networks for security
@@ -406,7 +377,7 @@ volumes:
   
   # Caddy config storage
   caddy_config:
-    driver: local      
+    driver: local            
 COMPOSEOF
     echo "  Created docker-compose.prod.yml"
     echo ""

@@ -74,13 +74,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get ECR login password
-        id: ecr-login
-        run: |
-          ECR_PASSWORD=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
-          echo "::add-mask::$ECR_PASSWORD"
-          echo "password=$ECR_PASSWORD" >> $GITHUB_OUTPUT
-
       - name: Get AWS Account ID
         id: aws-account
         run: |
@@ -93,115 +86,101 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          timeout: 60s
-          envs: AWS_REGION,ECR_REPOSITORY
+          timeout: 600s  # ← INCREASED from 300s to 600s (10 minutes)
+          script_stop_on_error: true
           script: |
-            set -e  # Exit on any error
+            set -euo pipefail
+            trap 'echo "ERROR: Deployment failed"; exit 1' ERR
             
-            echo "=============================================="
-            echo "  Deploying GitHub Analyzer"
-            echo "=============================================="
-            
-            # Variables
-            AWS_ACCOUNT_ID="${{ steps.aws-account.outputs.account_id }}"
-            ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
-            IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
-            
-            echo "Account ID: $AWS_ACCOUNT_ID"
-            echo "Registry: $ECR_REGISTRY"
-            echo "Image Tag: $IMAGE_TAG"
-            
-            # Navigate to app directory
-            cd /home/ec2-user/github-analyzer
-            
-            # Login to ECR
-            echo ""
-            echo "Logging into ECR..."
-            echo "${{ steps.ecr-login.outputs.password }}" | \
-              docker login --username AWS --password-stdin $ECR_REGISTRY
-            
-            # Backup current .env (in case we need to rollback)
-            if [ -f .env ]; then
-              cp .env .env.backup
-            fi
-            
-            # Update IMAGE_TAG in .env
-            echo ""
-            echo "Updating IMAGE_TAG to: $IMAGE_TAG"
-            sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=$IMAGE_TAG|" .env
-            
-            # Pull new image
-            echo ""
-            echo "Pulling new image..."
-            docker pull $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
-            
-            # Stop old containers
-            echo ""
-            echo "Stopping old containers..."
-            docker-compose -f docker-compose.prod.yml down || true
+            # ...existing code...
             
             # Start new containers
             echo ""
             echo "Starting new containers..."
-            docker-compose -f docker-compose.prod.yml up -d
-            
-            # Wait for containers to start
+            docker-compose -f docker-compose.prod.yml up -d || \
+              { echo "Failed to start containers!"; exit 1; }
+
+            # Wait for containers to be healthy
             echo ""
             echo "Waiting for containers to be healthy..."
-            sleep 15
             
-            # Health check
-            echo ""
-            echo "Running health check..."
-            HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health || echo "000")
+            MAX_ATTEMPTS=120  # ← INCREASED from 30 to 120 (4 minutes)
+            ATTEMPT=0
+            HEALTH_OK=false
             
-            if [ "$HEALTH_STATUS" = "200" ]; then
-              echo "Health check passed!"
+            while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+              ATTEMPT=$((ATTEMPT + 1))
               
-              # Clean up old images
-              echo ""
-              echo "Cleaning up old images..."
-              docker image prune -af --filter "until=24h"
+              # Check migration status first
+              MIGRATE_STATUS=$(docker inspect github-analyzer-migrate --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
               
-              echo ""
-              echo "=============================================="
-              echo "  DEPLOYMENT SUCCESSFUL!"
-              echo "=============================================="
-              echo "  Image: $IMAGE_TAG"
-              echo "  URL: http://${{ secrets.EC2_HOST }}"
-              echo "=============================================="
-            else
-              echo "Health check failed! Status: $HEALTH_STATUS"
-              echo ""
-              echo "Rolling back..."
-              
-              # Restore previous .env
-              if [ -f .env.backup ]; then
-                cp .env.backup .env
+              if [ "$MIGRATE_STATUS" != "exited" ] && [ "$MIGRATE_STATUS" != "unknown" ]; then
+                echo "[$ATTEMPT/$MAX_ATTEMPTS] Migration still running (status: $MIGRATE_STATUS)..."
+                sleep 3
+                continue
               fi
               
-              # Show logs for debugging
+              # Now check app health
+              if docker ps --filter "name=github-analyzer-app" --filter "status=running" | grep -q github-analyzer-app; then
+                # Try to curl the health endpoint
+                if timeout 5 curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+                  echo "✓ Application is healthy!"
+                  HEALTH_OK=true
+                  break
+                fi
+              fi
+              
+              echo "[$ATTEMPT/$MAX_ATTEMPTS] Waiting for app to be ready..."
+              sleep 2
+            done
+            
+            if [ "$HEALTH_OK" = false ]; then
               echo ""
-              echo "Container logs:"
-              docker-compose -f docker-compose.prod.yml logs --tail=50
+              echo "✗ Health check failed after ${MAX_ATTEMPTS} attempts"
+              echo ""
+              echo "Container status:"
+              docker ps -a --filter "name=github-analyzer"
+              
+              echo ""
+              echo "Migration logs:"
+              docker logs github-analyzer-migrate 2>/dev/null || echo "No migration logs"
+              
+              echo ""
+              echo "App container logs (last 100 lines):"
+              docker logs --tail=100 github-analyzer-app 2>/dev/null || echo "No app logs"
+              
+              echo ""
+              echo "Rolling back deployment..."
+              
+              if [ -f .env.backup ]; then
+                cp .env.backup .env
+                echo "Restored previous .env"
+              fi
+              
+              docker-compose -f docker-compose.prod.yml down || true
               
               exit 1
             fi
 
-      - name: Verify deployment
+            # Clean up old images
+            echo ""
+            echo "Cleaning up old images..."
+            docker image prune -af --filter "until=24h" || true
+            
+            echo ""
+            echo "=============================================="
+            echo "  DEPLOYMENT SUCCESSFUL!"
+            echo "=============================================="
+            echo "  Image: $IMAGE_TAG"
+            echo "  URL: http://${{ secrets.EC2_HOST }}"
+            echo "=============================================="
+
+      - name: Notify deployment status
+        if: always()
         run: |
-          echo "Verifying deployment from GitHub Actions runner..."
-          
-          # Wait a bit for everything to stabilize
-          sleep 5
-          
-          # Check health endpoint
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.EC2_HOST }}/health || echo "000")
-          
-          if [ "$RESPONSE" = "200" ]; then
-            echo "Deployment verified! Application is responding."
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✓ Deployment completed successfully"
           else
-            echo "Warning: Could not verify deployment from external check."
-            echo "Response code: $RESPONSE"
-            echo "This might be a network issue. Check the EC2 deployment logs."
+            echo "✗ Deployment failed"
+            exit 1
           fi

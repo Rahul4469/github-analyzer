@@ -1,112 +1,90 @@
 version: '3.8'
 
 services:
-
-# CADDY ---------------------------------------------------
   caddy:
     image: caddy:2-alpine
     container_name: github-analyzer-caddy
     restart: unless-stopped
     ports:
-      - "80:80"     # HTTP (for Let's Encrypt challenge & redirect)
-      - "443:443"   # HTTPS (main traffic)
+      - "80:80"
+      - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    networks: # Connect to our internal network
-      - frontend   # Can talk to app
-    # Wait for app to be ready before starting
+    networks:
+      - frontend
     depends_on:
       app:
         condition: service_healthy
-    # Limit resources to prevent runaway processes
     deploy:
       resources:
         limits:
-          cpus: '0.25'      # Max 25% of one CPU
-          memory: 128M      # Max 128 MB RAM
-    # Configure logging to prevent disk fill
+          cpus: '0.25'
+          memory: 128M
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"     # Max 10MB per log file
-        max-file: "3"       # Keep 3 rotated files
+        max-size: "10m"
+        max-file: "3"
 
-# DATABASE - PostgreSQL -------------------------------------
+  db:
+    image: postgres:15-alpine
+    container_name: github-analyzer-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PSQL_USER}
+      POSTGRES_PASSWORD: ${PSQL_PASSWORD}
+      POSTGRES_DB: ${PSQL_DATABASE}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PSQL_USER} -d ${PSQL_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
-db:
-  image: postgres:15-alpine
-  container_name: github-analyzer-db
-  restart: unless-stopped
-  environment:
-    POSTGRES_USER: ${PSQL_USER}
-    POSTGRES_PASSWORD: ${PSQL_PASSWORD}
-    POSTGRES_DB: ${PSQL_DATABASE}
-  volumes:
-    - postgres_data:/var/lib/postgresql/data
-  networks:
-    - backend
-  # Health check - verify PostgreSQL is ready
-  # pg_isready is a PostgreSQL utility that checks connection
-  healthcheck:
-    test: ["CMD-SHELL", "pg_isready -U ${PSQL_USER} -d ${PSQL_DATABASE}"]
-    interval: 10s      # Check every 10 seconds
-    timeout: 5s        # Wait max 5 seconds for response
-    retries: 5         # Mark unhealthy after 5 failures
-    start_period: 30s  # Wait 30s before first check (startup time)      
-
-
-# MIGRATIONS ------------------------------------------------
-migrate:
-    # Use Go image to run goose migrations
-    image: golang:1.21-alpine
-    
+  # OPTIMIZED MIGRATIONS
+  migrate:
+    image: migrate/migrate:latest  # ← USE PURPOSE-BUILT MIGRATION IMAGE
     container_name: github-analyzer-migrate
-    
-    # Wait for database to be healthy before running
     depends_on:
       db:
         condition: service_healthy
-    
-    # Mount migration files from host
     volumes:
       - ./migrations:/migrations:ro
-    
-    # Database connection string
     environment:
       DATABASE_URL: postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable
-    
     networks:
       - backend
-    
-    # Install goose and run migrations
-    # This runs once and exits
-    command: >
-      sh -c "
-        echo 'Installing goose...' &&
-        apk add --no-cache git &&
-        go install github.com/pressly/goose/v3/cmd/goose@latest &&
-        echo 'Running migrations...' &&
-        goose -dir /migrations postgres \"$$DATABASE_URL\" up &&
-        echo 'Migrations complete!'
-      " 
+    # ← REMOVED slow goose installation
+    command: 
+      - "-path"
+      - "/migrations"
+      - "-database"
+      - "postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable"
+      - "up"
+    # Add healthcheck to track migration completion
+    healthcheck:
+      test: ["CMD", "migrate", "-path", "/migrations", "-database", "postgres://${PSQL_USER:-postgres}:${PSQL_PASSWORD:-postgres}@db:5432/${PSQL_DATABASE:-github_analyzer}?sslmode=disable", "version"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 0s
 
-# APPLICATION - Go Backend ---------------------------------------------
-
-app:
-  # Image from ECR (pushed by GitHub Actions)
-  # Format: <account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>
-  image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/github-analyzer:${IMAGE_TAG:-latest}
-  container_name: github-analyzer-app
-  restart: unless-stopped
-  # Wait for migrations to complete successfully
-  depends_on:
-    db:
-      condition: service_healthy
-    migrate:
-      condition: service_completed_successfully
-  environment:
+  app:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/github-analyzer:${IMAGE_TAG:-latest}
+    container_name: github-analyzer-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully  # ← Waits for migrations
+    environment:
       - APP_ENV=production
       - SERVER_PORT=3000
       - BASE_URL=${BASE_URL}
@@ -116,67 +94,40 @@ app:
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
       - GITHUB_REDIRECT_URL=${BASE_URL}/auth/github/callback
-      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}    
-  # Connect to both networks
-  networks:
-    - frontend   # Caddy can reach us
-    - backend    # We can reach database
-  # Health check - verify app is responding
-  healthcheck:
-    test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
-    interval: 30s
-    timeout: 10s
-    retries: 3
-    start_period: 10s  
-
-  # Resource limits
-  deploy:
-    resources:
-      limits:
-        cpus: '0.5'       # Max 50% of one CPU
-        memory: 512M      # Max 512 MB RAM
-      reservations:
-        cpus: '0.25'      # Reserve 25% CPU
-        memory: 256M      # Reserve 256 MB RAM  
-  # Logging configuration
-  logging:
-    driver: "json-file"
-    options:
-      max-size: "10m"
-      max-file: "3"      
-
-# NETWORKS ------------------------------------------------------------
-# Isolated networks for security
-# Services can only talk to others on same network
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 10s  # ← CHECK MORE FREQUENTLY
+      timeout: 5s
+      retries: 5
+      start_period: 30s  # ← INCREASED startup grace period
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
-  # Frontend network: Caddy <-> App
   frontend:
     driver: bridge
-  
-  # Backend network: App <-> Database
   backend:
     driver: bridge
-  
-  # NETWORK ISOLATION:
-  # - Caddy can talk to App (both on frontend)
-  # - App can talk to DB (both on backend)
-  # - Caddy CANNOT talk to DB directly (different networks)
-  # - DB CANNOT be reached from internet (not on frontend, no ports exposed)
 
-# VOLUMES ------------------------------------------------------------
-
-# Persistent storage that survives container restarts
 volumes:
-  # PostgreSQL data
   postgres_data:
     driver: local
-  
-  # Caddy certificate storage
-  # IMPORTANT: Persist this to avoid re-requesting certs
   caddy_data:
     driver: local
-  
-  # Caddy config storage
   caddy_config:
-    driver: local      
+    driver: local
