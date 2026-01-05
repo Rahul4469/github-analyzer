@@ -276,7 +276,7 @@ services:
 
   # MIGRATIONS using Goose
   migrate:
-    image: gomicro/goose:3.18.0
+    image: gomicro/goose:latest
     container_name: github-analyzer-migrate
     depends_on:
       db:
