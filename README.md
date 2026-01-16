@@ -17,8 +17,6 @@ AI-powered code analysis for GitHub repositories. Analyze your code for bugs, se
 
 Go, PostgreSQL, Chi router, Perplexity AI, Docker, Tailwind CSS
 
-## Getting Started
-
 ### Prerequisites
 
 - Go 1.24+
@@ -27,7 +25,7 @@ Go, PostgreSQL, Chi router, Perplexity AI, Docker, Tailwind CSS
 - GitHub OAuth App credentials
 - Perplexity API key
 
-### Docker Setup (Recommended)
+### Docker Setup
 
 ```bash
 git clone https://github.com/rahul4469/github-analyzer.git
