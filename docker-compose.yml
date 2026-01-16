@@ -1,7 +1,7 @@
 version: "3.9"
 
 services:
-  db: # The service will be named db. 
+  db:  
     image: postgres:16-alpine 
     restart: unless-stopped 
     container_name: github-analyzer-db
@@ -9,7 +9,7 @@ services:
       POSTGRES_USER: ${PSQL_USER} 
       POSTGRES_PASSWORD: ${PSQL_PASSWORD}
       POSTGRES_DB: ${PSQL_DATABASE} 
-    ports: # Expose ports so that apps not running via docker-compose can connect to them.
+    ports: 
       - 5432:5432  
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PSQL_USER:-postgres} -d ${PSQL_DATABASE:-github_analyzer}"]
@@ -39,7 +39,7 @@ services:
     image: adminer
     restart: always
     environment:
-      ADMINER_DESIGN: dracula # Pick a theme - https://github.com/vrana/adminer/tree/master/designs
+      ADMINER_DESIGN: dracula 
     ports:
       - 3333:8080    
 

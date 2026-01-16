@@ -20,7 +20,6 @@ const (
 	StatusFailed     AnalysisStatus = "failed"
 )
 
-// FileContent represents a fetched code file from GitHub.
 type FileContent struct {
 	Path     string `json:"path"`
 	Content  string `json:"content"`
@@ -28,7 +27,6 @@ type FileContent struct {
 	Size     int    `json:"size"`
 }
 
-// CodeStructure represents the file tree of a repository.
 type CodeStructure struct {
 	TotalFiles        int            `json:"total_files"`
 	TotalSize         int            `json:"total_size"`
@@ -37,7 +35,6 @@ type CodeStructure struct {
 	LanguageBreakdown map[string]int `json:"language_breakdown"`
 }
 
-// Issue represents a code issue found during analysis.
 type Issue struct {
 	Severity    string `json:"severity"` // HIGH, MEDIUM, LOW
 	Category    string `json:"category"`
@@ -48,7 +45,6 @@ type Issue struct {
 	Suggestion  string `json:"suggestion,omitempty"`
 }
 
-// AnalysisSummary provides a quick overview of analysis results.
 type AnalysisSummary struct {
 	TotalIssues      int            `json:"total_issues"`
 	IssuesBySeverity map[string]int `json:"issues_by_severity"`
@@ -93,7 +89,6 @@ func NewAnalysisService(pool *pgxpool.Pool) *AnalysisService {
 	return &AnalysisService{pool: pool}
 }
 
-// to create/start new analysis for a repository
 func (s *AnalysisService) Create(ctx context.Context, userID, repositoryID int64) (*Analysis, error) {
 	query := `
 		INSERT INTO analyses (user_id, repository_id, status)
@@ -130,7 +125,6 @@ func (s *AnalysisService) Create(ctx context.Context, userID, repositoryID int64
 	return analysis, nil
 }
 
-// MarkProcessing updates the analysis status to processing.
 func (s *AnalysisService) MarkProcessing(ctx context.Context, analysisID int64) error {
 	query := `
 		UPDATE analyses 
@@ -149,7 +143,6 @@ func (s *AnalysisService) MarkProcessing(ctx context.Context, analysisID int64) 
 	return nil
 }
 
-// UpdateGitHubData stores the fetched GitHub data.
 func (s *AnalysisService) UpdateGitHubData(ctx context.Context, analysisID int64, codeStructure *CodeStructure, codeFiles []FileContent, readme string) error {
 	// Combine code structure and files into a single JSONB structure
 	combinedData := struct {
@@ -182,7 +175,6 @@ func (s *AnalysisService) UpdateGitHubData(ctx context.Context, analysisID int64
 	return nil
 }
 
-// Complete marks the analysis as completed with results.
 func (s *AnalysisService) Complete(ctx context.Context, analysisID int64, aiAnalysis string, summary *AnalysisSummary, issues []Issue, tokensUsed int) error {
 	summaryJSON, err := json.Marshal(summary)
 	if err != nil {
@@ -243,7 +235,6 @@ func (s *AnalysisService) Fail(ctx context.Context, analysisID int64, errorMsg s
 	return nil
 }
 
-// ByID retrieves an analysis by its ID.
 func (s *AnalysisService) ByID(ctx context.Context, id int64) (*Analysis, error) {
 	query := `
 		SELECT a.id, a.user_id, a.repository_id, a.status, a.code_structure, a.readme_content,
@@ -322,7 +313,6 @@ func (s *AnalysisService) ByID(ctx context.Context, id int64) (*Analysis, error)
 	return analysis, nil
 }
 
-// ByUserID retrieves all analyses for a user, ordered by most recent.
 func (s *AnalysisService) ByUserID(ctx context.Context, userID int64, limit int) ([]*Analysis, error) {
 	if limit <= 0 {
 		limit = 50
@@ -430,7 +420,6 @@ func (s *AnalysisService) CountByStatus(ctx context.Context, userID int64) (map[
 	return counts, nil
 }
 
-// Delete removes an analysis.
 func (s *AnalysisService) Delete(ctx context.Context, id int64) error {
 	query := `DELETE FROM analyses WHERE id = $1`
 
@@ -499,22 +488,18 @@ func (a *Analysis) Duration() time.Duration {
 	return a.CompletedAt.Sub(*a.StartedAt)
 }
 
-// IsPending returns true if the analysis is waiting to start.
 func (a *Analysis) IsPending() bool {
 	return a.Status == StatusPending
 }
 
-// IsProcessing returns true if the analysis is in progress.
 func (a *Analysis) IsProcessing() bool {
 	return a.Status == StatusProcessing
 }
 
-// IsCompleted returns true if the analysis finished successfully.
 func (a *Analysis) IsCompleted() bool {
 	return a.Status == StatusCompleted
 }
 
-// IsFailed returns true if the analysis encountered an error.
 func (a *Analysis) IsFailed() bool {
 	return a.Status == StatusFailed
 }

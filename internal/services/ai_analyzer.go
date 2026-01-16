@@ -15,14 +15,12 @@ import (
 	"github.com/rahul4469/github-analyzer/internal/models"
 )
 
-// PerplexityService handles AI-powered code analysis.
 type PerplexityService struct {
 	apiKey     string
 	model      string
 	httpClient *http.Client
 }
 
-// NewPerplexityService creates a new Perplexity AI client.
 func NewPerplexityService(apiKey, model string) *PerplexityService {
 	return &PerplexityService{
 		apiKey: apiKey,
@@ -44,7 +42,6 @@ type AnalysisInput struct {
 	CodeFiles       []models.FileContent
 }
 
-// AnalysisResult contains the parsed AI analysis.
 type AnalysisResult struct {
 	RawAnalysis string
 	Summary     *models.AnalysisSummary
@@ -52,19 +49,16 @@ type AnalysisResult struct {
 	TokensUsed  int
 }
 
-// PerplexityRequest represents the API request body.
 type PerplexityRequest struct {
 	Model    string              `json:"model"`
 	Messages []PerplexityMessage `json:"messages"`
 }
 
-// PerplexityMessage represents a message in the conversation.
 type PerplexityMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// PerplexityResponse represents the API response.
 type PerplexityResponse struct {
 	ID      string `json:"id"`
 	Model   string `json:"model"`
@@ -84,7 +78,6 @@ type PerplexityResponse struct {
 	} `json:"choices"`
 }
 
-// Analyze sends the repository data to Perplexity AI for analysis.
 func (s *PerplexityService) Analyze(ctx context.Context, input AnalysisInput) (*AnalysisResult, error) {
 	prompt := s.buildPrompt(input)
 
@@ -155,7 +148,6 @@ func (s *PerplexityService) Analyze(ctx context.Context, input AnalysisInput) (*
 	}, nil
 }
 
-// getSystemPrompt returns the system prompt for the AI.
 func (s *PerplexityService) getSystemPrompt() string {
 	return `You are an expert code reviewer and software architect. Your task is to analyze code repositories and identify:
 
@@ -428,7 +420,6 @@ func (s *PerplexityService) parseIssuesSimple(response string) []models.Issue {
 	return issues
 }
 
-// buildSummary creates an AnalysisSummary from issues and raw analysis.
 func (s *PerplexityService) buildSummary(issues []models.Issue, rawAnalysis string) *models.AnalysisSummary {
 	summary := &models.AnalysisSummary{
 		TotalIssues:      len(issues),

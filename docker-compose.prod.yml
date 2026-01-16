@@ -64,8 +64,6 @@ services:
       - backend
     entrypoint: ["/bin/sh", "-c"]
     command: ["goose up"]
-    # NOTE: Healthcheck removed - migrate container exits after completion,
-    # healthchecks cannot run on exited containers. CD workflow checks exit code instead.
 
   app:
     image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/github-analyzer:${IMAGE_TAG:-latest}
@@ -92,10 +90,10 @@ services:
       - backend
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
-      interval: 10s  # ← CHECK MORE FREQUENTLY
+      interval: 10s  
       timeout: 5s
       retries: 5
-      start_period: 30s  # ← INCREASED startup grace period
+      start_period: 30s  
     deploy:
       resources:
         limits:

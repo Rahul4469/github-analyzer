@@ -15,13 +15,11 @@ import (
 	"github.com/rahul4469/github-analyzer/internal/models"
 )
 
-// GitHubService handles all interactions with the GitHub API.
 type GitHubService struct {
 	baseURL    string
 	httpClient *http.Client
 }
 
-// NewGitHubService creates a new GitHub API client.
 func NewGitHubService(baseURL string) *GitHubService {
 	return &GitHubService{
 		baseURL: baseURL,
@@ -31,7 +29,6 @@ func NewGitHubService(baseURL string) *GitHubService {
 	}
 }
 
-// GitHubRepository represents repository metadata from GitHub API.
 type GitHubRepository struct {
 	Name            string `json:"name"`
 	FullName        string `json:"full_name"`
@@ -44,7 +41,6 @@ type GitHubRepository struct {
 	Private         bool   `json:"private"`
 }
 
-// GitHubTreeEntry represents a file/directory in the repository tree.
 type GitHubTreeEntry struct {
 	Path string `json:"path"`
 	Mode string `json:"mode"`
@@ -75,13 +71,11 @@ type GitHubContent struct {
 	DownloadURL string `json:"download_url"`
 }
 
-// GitHubError represents an error response from GitHub API.
 type GitHubError struct {
 	Message          string `json:"message"`
 	DocumentationURL string `json:"documentation_url"`
 }
 
-// GetRepository fetches repository metadata from GitHub.
 func (s *GitHubService) GetRepository(ctx context.Context, owner, repo, token string) (*GitHubRepository, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s", s.baseURL, owner, repo)
 
@@ -110,7 +104,6 @@ func (s *GitHubService) GetRepository(ctx context.Context, owner, repo, token st
 	return &repository, nil
 }
 
-// GetRepositoryTree fetches the complete file tree for a repository.
 func (s *GitHubService) GetRepositoryTree(ctx context.Context, owner, repo, token string) (*GitHubTree, error) {
 	// First get the default branch
 	repoInfo, err := s.GetRepository(ctx, owner, repo, token)
@@ -175,7 +168,6 @@ func (s *GitHubService) GetFileContent(ctx context.Context, owner, repo, path, t
 	return &content, nil
 }
 
-// GetREADME fetches the README file content.
 func (s *GitHubService) GetREADME(ctx context.Context, owner, repo, token string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/readme", s.baseURL, owner, repo)
 
@@ -333,7 +325,6 @@ func (s *GitHubService) buildCodeStructure(tree *GitHubTree) *models.CodeStructu
 	return structure
 }
 
-// scoreFiles assigns importance scores to files for prioritization.
 func (s *GitHubService) scoreFiles(entries []GitHubTreeEntry) []FileImportance {
 	var scored []FileImportance
 
@@ -362,7 +353,6 @@ func (s *GitHubService) scoreFiles(entries []GitHubTreeEntry) []FileImportance {
 	return scored
 }
 
-// calculateFileScore determines how important a file is for analysis.
 func calculateFileScore(path string) (int, string) {
 	name := filepath.Base(path)
 	dir := filepath.Dir(path)
@@ -550,7 +540,6 @@ func isBinaryContent(content string) bool {
 	return false
 }
 
-// setHeaders sets common headers for GitHub API requests.
 func (s *GitHubService) setHeaders(req *http.Request, token string) {
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	req.Header.Set("User-Agent", "GitHub-Analyzer/1.0")
@@ -585,7 +574,6 @@ func (s *GitHubService) checkResponse(resp *http.Response) error {
 	}
 }
 
-// GetRateLimit checks the current rate limit status.
 func (s *GitHubService) GetRateLimit(ctx context.Context, token string) (remaining, limit int, resetTime time.Time, err error) {
 	url := fmt.Sprintf("%s/rate_limit", s.baseURL)
 

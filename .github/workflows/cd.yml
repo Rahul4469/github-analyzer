@@ -86,8 +86,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          timeout: 600s  # ← 10 minutes for deployment including migrations
-          script_stop_on_error: true
+          timeout: 600s 
           script: |
             set -euo pipefail
             trap 'echo "ERROR: Deployment failed"; exit 1' ERR
